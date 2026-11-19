@@ -16,6 +16,13 @@
     <string name="browse_ytm_sign_out">登出 YouTube Music</string>
     <string name="browse_ytm_pair">配對 YouTube Music</string>
     <string name="browse_lyrics_sync">歌詞同步</string>
+    <string name="browse_lyrics_sync_zero">0 毫秒</string>
+    <string name="browse_lyrics_sync_delta">%1$+d 毫秒</string>
+    <string name="browse_lyrics_sync_earlier">提前</string>
+    <string name="browse_lyrics_sync_later">延後</string>
+    <string name="browse_lyrics_sync_default">預設</string>
+    <string name="browse_lyrics_sync_earlier_step">歌詞提前 %1$d 毫秒</string>
+    <string name="browse_lyrics_sync_later_step">歌詞延後 %1$d 毫秒</string>
     <string name="browse_lyrics_sync_hint">歌詞比音樂早就延後，較慢則提前。</string>
     <string name="browse_offset_value">%1$+d 毫秒</string>
     <string name="browse_offset_default">0 毫秒（預設）</string>
@@ -25,6 +32,12 @@
     <string name="browse_performance_mode_hint">停用動態封面影片以提升老舊電視盒硬體的流暢度與穩定性。</string>
     <string name="browse_performance_standard">標準模式</string>
     <string name="browse_performance_low">低效能模式</string>
+    <string name="browse_decoder_mode">解碼方式</string>
+    <string name="browse_decoder_hw">硬解</string>
+    <string name="browse_decoder_sw">軟解</string>
+    <string name="browse_decoder_hw_hint">系統解碼；變速或雜音請切回軟解。</string>
+    <string name="browse_decoder_sw_hint">內建 FFmpeg 解碼，相容性最好。</string>
+    <string name="browse_decoder_sw_unavailable">此裝置缺少 FFmpeg 元件，軟解會退回系統解碼。</string>
     <string name="browse_ytm_name">YouTube Music</string>
     <string name="browse_apple_name">Apple Music</string>
     <string name="browse_selected_source">✓ %1$s</string>

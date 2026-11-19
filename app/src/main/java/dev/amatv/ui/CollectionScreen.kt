@@ -43,6 +43,8 @@ internal fun CollectionScreen(
     firstFocus: FocusRequester,
     onRetry: () -> Unit,
     onPlay: (index: Int, shuffle: Boolean) -> Unit,
+    onAddAlbum: () -> Unit = {},
+    albumMessage: String? = null,
 ) {
     val collection = state.collection ?: return
     val listState = rememberLazyListState()
@@ -67,6 +69,7 @@ internal fun CollectionScreen(
     }
     val playFocus = firstFocus
     val shuffleFocus = remember { FocusRequester() }
+    val addAlbumFocus = remember { FocusRequester() }
     val retryFocus = remember { FocusRequester() }
     val ready = !state.loading && state.error == null && state.tracks.isNotEmpty()
     val duration = remember(state.tracks) { state.tracks.sumOf { it.durationMs }.coerceAtLeast(0L) }
@@ -112,13 +115,8 @@ internal fun CollectionScreen(
                     CollectionAction(
                         stringResource(R.string.browse_play), Icons.Rounded.PlayArrow, { onPlay(0, false) }, enabled = ready, retainFocus = true,
                         modifier = Modifier.automationId("collection-play").weight(1f).height(42.dp).focusRequester(playFocus)
-                            .onPreviewKeyEvent { event ->
-                                if (ready && event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
-                                    event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                                    moveToSong(requestedIndex)
-                                    true
-                                } else false
-                            }
+                            // v0.6: 不再在此拦截 DPAD_DOWN 直接跳歌曲——必须让焦点经
+                            // focusProperties 落到下方「添加歌单」，否则遥控器永远到不了它。
                             .focusProperties {
                                 left = FocusRequester.Cancel
                                 right = when {
@@ -126,7 +124,7 @@ internal fun CollectionScreen(
                                     state.error != null -> retryFocus
                                     else -> FocusRequester.Cancel
                                 }
-                                down = FocusRequester.Cancel
+                                down = addAlbumFocus
                                 up = FocusRequester.Cancel
                             },
                     )
@@ -135,8 +133,10 @@ internal fun CollectionScreen(
                         { onPlay(state.tracks.indices.random(), true) }, enabled = ready,
                         modifier = Modifier.automationId("collection-shuffle").weight(1f).height(42.dp).focusRequester(shuffleFocus)
                             .onPreviewKeyEvent { event ->
+                                // 仅保留 DPAD_RIGHT 直接进歌曲列表的快捷操作；DOWN 交给
+                                // focusProperties 落到「添加歌单」。
                                 if (ready && event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
-                                    event.nativeKeyEvent.keyCode in listOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                                    event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
                                     moveToSong(requestedIndex)
                                     true
                                 } else false
@@ -145,9 +145,33 @@ internal fun CollectionScreen(
                                 left = playFocus
                                 up = FocusRequester.Cancel
                                 right = FocusRequester.Cancel
-                                down = FocusRequester.Cancel
+                                down = addAlbumFocus
                             },
                     )
+                }
+                Spacer(Modifier.height(10.dp))
+                CollectionAction(
+                    "添加歌单", null, onAddAlbum,
+                    modifier = Modifier.automationId("collection-add-album").fillMaxWidth().height(42.dp)
+                        .focusRequester(addAlbumFocus)
+                        .onPreviewKeyEvent { event ->
+                            if (ready && event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
+                                event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                                moveToSong(requestedIndex)
+                                true
+                            } else false
+                        }
+                        .focusProperties {
+                            up = playFocus
+                            left = FocusRequester.Cancel
+                            right = FocusRequester.Cancel
+                            down = FocusRequester.Cancel
+                        },
+                )
+                if (!albumMessage.isNullOrBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(albumMessage, color = Color(0xFF9BE3A2), fontSize = 12.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
 
@@ -200,7 +224,7 @@ internal fun CollectionScreen(
                                             }
                                             KeyEvent.KEYCODE_DPAD_UP -> {
                                                 if (requestedIndex > 0) moveToSong(requestedIndex - 1)
-                                                else runCatching { playFocus.requestFocus() }
+                                                else runCatching { addAlbumFocus.requestFocus() }
                                                 true
                                             }
                                             else -> false
@@ -209,7 +233,7 @@ internal fun CollectionScreen(
                                     .focusProperties {
                                         right = FocusRequester.Cancel
                                         left = if (ready) shuffleFocus else firstFocus
-                                        if (index == 0) up = playFocus
+                                        if (index == 0) up = addAlbumFocus
                                         if (index == state.tracks.lastIndex) down = FocusRequester.Cancel
                                     },
                                 cornerRadius = 8.dp, focusedScale = 1f,

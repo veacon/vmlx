@@ -37,7 +37,7 @@ enum class AudioQuality(
     val label: String get() = when (this) {
         STANDARD -> "标准 128k"
         MEDIUM -> "中品 192k"
-        HIGH -> "高品質 320k"
+        HIGH -> "高品质 320k"
         LOSSLESS -> "无损 FLAC"
         HIRES -> "Hi-Res 无损"
     }

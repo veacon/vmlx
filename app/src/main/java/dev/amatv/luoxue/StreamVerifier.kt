@@ -9,7 +9,11 @@ import okhttp3.Request
  */
 class StreamVerifier(private val http: OkHttpClient) {
 
-    companion object { private const val SNIFF_BYTES = 16 }
+    companion object {
+        // 16B 对 ftyp/mp3 帧头够用，但部分 CDN 的 ftyp box 更靠后；32B 提升识别率，
+        // 依然是一次 Range 往返，不增加 RTT。
+        private const val SNIFF_BYTES = 32
+    }
 
     data class Probe(
         val ok: Boolean,
@@ -31,8 +35,10 @@ class StreamVerifier(private val http: OkHttpClient) {
             .build()
         return try {
             http.newCall(req).execute().use { resp ->
-                val total = resp.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
-                    ?: resp.body?.contentLength() ?: 0L
+                // chunked 响应 contentLength() 返回 -1，必须归零，否则会被当成"超大体积"误算码率。
+                val rangeTotal = resp.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
+                val contentLen = resp.body?.contentLength()?.takeIf { it > 0 } ?: 0L
+                val total = rangeTotal?.takeIf { it > 0 } ?: contentLen
                 val head = runCatching {
                     val source = resp.body?.source()
                     if (source == null) ByteArray(0) else {
@@ -65,7 +71,7 @@ class StreamVerifier(private val http: OkHttpClient) {
         }
     }
 
-    private fun sniff(b: ByteArray): String {
+    internal fun sniff(b: ByteArray): String {
         if (b.size < 12) return "unknown"
         fun at(i: Int, s: String) = b.size >= i + s.length &&
             String(b, i, s.length, Charsets.ISO_8859_1) == s

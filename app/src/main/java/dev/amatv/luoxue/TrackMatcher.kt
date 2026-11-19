@@ -51,17 +51,62 @@ object TrackMatcher {
         "sodagreen" to "苏打绿",
         "escape plan" to "逃跑计划",
         "new pants" to "新裤子",
+        "taylor swift" to "泰勒斯威夫特",
+        "adele" to "阿黛尔",
+        "ed sheeran" to "艾德希兰",
+        "bruno mars" to "布鲁诺马尔斯",
+        "maroon 5" to "魔力红",
+        "coldplay" to "酷玩乐队",
+        "linkin park" to "林肯公园",
+        "beyonce" to "碧昂丝",
+        "one direction" to "单向组合",
+        "justin bieber" to "贾斯汀比伯",
+        "ariana grande" to "爱莉安娜格兰德",
+        "billie eilish" to "比莉艾利什",
+        "weeknd" to "威肯",
+        "the weeknd" to "威肯",
+        "dua lipa" to "杜阿利帕",
+        "shawn mendes" to "肖恩蒙德兹",
+        "alan walker" to "艾伦沃克",
+        "imagine dragons" to "梦龙乐队",
+        "queen" to "皇后乐队",
+        "beyond" to "beyond",
+        "张国荣" to "leslie cheung",
+        "邓丽君" to "teresa teng",
+        "张学友" to "jacky cheung",
+        "刘德华" to "andy lau",
+        "郭富城" to "aaron kwok",
+        "林忆莲" to "sandy lam",
+        "莫文蔚" to "karen mok",
+        "蔡依林" to "jolin tsai",
+        "张韶涵" to "angela chang",
+        "五月天" to "mayday",
+        "苏打绿" to "sodagreen",
+        "告五人" to "accusefive",
     )
+
+    /**
+     * v0.7：从**原始**标题提取版本标记（live/remix/...）。
+     * [normalize] 会抹掉这些词以保证标题主体可比，若在归一化串上做版本比对，
+     * 惩罚条件永远为假（旧实现的死代码）。必须在原文上单独提取。
+     */
+    fun versionTags(raw: String): Set<String> {
+        val lower = raw.lowercase()
+        return VERSION_WORDS.filter { w ->
+            Regex("(^|[^a-z])" + Regex.escape(w) + "([^a-z]|$)").containsMatchIn(lower)
+        }.toSet()
+    }
 
     fun normalize(raw: String): String {
         var s = raw.lowercase()
-        s = if (Build.VERSION.SDK_INT >= 24) {
-            runCatching {
+        // 先用内置字表保证任何环境（含纯 JVM 单测）行为一致；
+        // ICU 可用时再补一遍覆盖字表未收录的字。
+        s = s.map { T2S[it] ?: it }.joinToString("")
+        s = runCatching {
+            if (Build.VERSION.SDK_INT >= 24) {
                 android.icu.text.Transliterator.getInstance("Traditional-Simplified").transliterate(s)
-            }.getOrDefault(s)
-        } else {
-            s.map { T2S[it] ?: it }.joinToString("")
-        }
+            } else s
+        }.getOrDefault(s)
         s = s.replace(Regex("\\(.*?\\)|\\[.*?\\]|（.*?）|【.*?】"), " ")
         s = s.replace(Regex("[\\s\\-_/·,，.。'’\"“”!！?？:：&+]"), "")
         VERSION_WORDS.forEach { s = s.replace(it, "") }
@@ -83,12 +128,19 @@ object TrackMatcher {
 
     private fun normArtist(raw: String): String = canonicalArtist(raw)
 
+    /**
+     * v0.7：改用对称 Dice 系数。旧实现 `a.count{it in b}/a.size` 只按目标长度归一，
+     * 候选比目标长（如带后缀）时召回虚高、短标题又容易 0 分，区分度差。
+     * 对称后两侧长度都参与，短/长标题都稳定落在 0..30。
+     */
     private fun bigramScore(target: String, cand: String): Int {
         if (target.isEmpty() || cand.isEmpty()) return 0
         val a = (0 until target.length - 1).map { target.substring(it, it + 2) }.toSet()
         val b = (0 until cand.length - 1).map { cand.substring(it, it + 2) }.toSet()
-        if (a.isEmpty()) return 0
-        return (30.0 * a.count { it in b } / a.size).toInt()
+        if (a.isEmpty() && b.isEmpty()) return if (target == cand) 30 else 0
+        if (a.isEmpty() || b.isEmpty()) return 0
+        val overlap = a.count { it in b }
+        return (30.0 * 2 * overlap / (a.size + b.size)).toInt()
     }
 
     fun score(cand: Candidate, title: String, artist: String, album: String, durationSec: Int): Int {
@@ -126,13 +178,19 @@ object TrackMatcher {
             }
         }
 
+        // 版本一致性：在**原始**标题上比对版本标记。
+        // 旧实现在归一化串上比对（normalize 已抹掉版本词），条件永远为假=死代码，
+        // 导致 "Never Gonna Give You Up" 会命中它的 live/remix 版。
+        val tv = versionTags(title)
+        val cv = versionTags(cand.title)
+        if (tv != cv) {
+            // 一方有版本词另一方没有，或两版不同 → 强惩罚（避免版本错配）
+            s -= if (tv.isEmpty() || cv.isEmpty()) 16 else 12
+        }
+
         // 同名不同曲：标题撞上但艺人完全不符、时长又对不上时，不能算命中
         // （P0 例：Apple 的 Wayfarer 被匹配到另一位歌手的同名曲）
         if (!artistOk && durDiff > 5) s -= 20
-
-        VERSION_WORDS.forEach { w ->
-            if (nc.contains(w) && !nt.contains(w)) s -= 14
-        }
         return s
     }
 

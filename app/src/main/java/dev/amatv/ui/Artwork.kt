@@ -65,6 +65,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import dev.amatv.R
 import dev.amatv.model.Track
+import dev.amatv.model.gradientPalette
 import dev.amatv.integration.ContentCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -211,7 +212,7 @@ private fun ArtworkSurface(
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(cornerRadius))
-            .background(Brush.linearGradient(track.palette)),
+            .background(Brush.linearGradient(track.gradientPalette)),
     ) {
         AsyncImage(
             model = request,
@@ -266,7 +267,7 @@ private class SyntheticArtworkPainter(private val track: Track) : Painter() {
         }
         drawRect(
             brush = Brush.linearGradient(
-                colors = track.palette,
+                colors = track.gradientPalette,
                 start = Offset.Zero,
                 end = Offset(w, h),
             ),
@@ -300,7 +301,7 @@ private class SyntheticArtworkPainter(private val track: Track) : Painter() {
             2 -> {
                 drawCircle(
                     brush = Brush.radialGradient(
-                        listOf(Color(0xFFF1A7D0), track.palette[1], Color.Transparent),
+                        listOf(Color(0xFFF1A7D0), track.gradientPalette[1], Color.Transparent),
                         center = Offset(w * 0.54f, h * 0.42f),
                         radius = w * 0.58f,
                     ),
@@ -333,7 +334,7 @@ private class SyntheticArtworkPainter(private val track: Track) : Painter() {
             else -> {
                 drawPath(
                     polygon(0.0f to 0.0f, 0.98f to 0.0f, 0.22f to 0.95f),
-                    color = track.palette[1].copy(alpha = 0.7f),
+                    color = track.gradientPalette[1].copy(alpha = 0.7f),
                 )
                 drawPath(
                     polygon(1.0f to 0.18f, 1.0f to 1.0f, 0.1f to 1.0f),

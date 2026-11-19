@@ -7,6 +7,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.util.LinkedHashMap
 
 /**
  * 平台搜索层：Apple 侧只给歌名/歌手，这里补上平台曲目 ID。
@@ -24,17 +25,49 @@ class PlatformSearch(private val http: OkHttpClient) {
      * （主艺人提取 → 别名映射 → 繁转简），避免 Apple 元数据 "Jay Chou" /
      * 「周杰倫」 搜不到国内曲库，这是「周杰伦《落雪》命中不稳定」的结构性主因。
      */
+    /**
+     * v0.7：搜索结果短缓存。同一首歌在以下场景会重复搜索三平台：
+     *  - 手动换源（excludeScript 强制重解析）；
+     *  - 直链过期重解析；
+     *  - 预取命中后真正播放。
+     * 每次都是 3 个网络 RTT，是"切换音源等待长"的隐形大头。短 TTL 缓存
+     * 只缓存**成功且非空**的结果，失败不缓存（避免一次抖动被记住）；容量
+     * 有界，按访问顺序淘汰，避免长时间播放积累。
+     */
+    private data class CacheEntry(val at: Long, val items: List<Candidate>)
+    private val queryCache = object : LinkedHashMap<String, CacheEntry>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?) = size > 48
+    }
+
+    @Synchronized
+    private fun cachedQuery(key: String): List<Candidate>? {
+        val e = queryCache[key] ?: return null
+        if (System.currentTimeMillis() - e.at > QUERY_TTL_MS) {
+            queryCache.remove(key)
+            return null
+        }
+        return e.items
+    }
+
+    @Synchronized
+    private fun rememberQuery(key: String, items: List<Candidate>) {
+        if (items.isNotEmpty()) queryCache[key] = CacheEntry(System.currentTimeMillis(), items)
+    }
+
     suspend fun searchAll(title: String, artist: String): List<Candidate> {
         val q = listOf(title.trim(), TrackMatcher.canonicalArtist(artist))
             .filter { it.isNotEmpty() }
             .joinToString(" ")
         if (q.isEmpty()) return emptyList()
-        return coroutineScope {
+        cachedQuery(q)?.let { return it }
+        val result = coroutineScope {
             val wy = async(Dispatchers.IO) { runCatching { netease(q) }.getOrDefault(emptyList()) }
             val tx = async(Dispatchers.IO) { runCatching { qq(q) }.getOrDefault(emptyList()) }
             val kg = async(Dispatchers.IO) { runCatching { kugou(q) }.getOrDefault(emptyList()) }
             wy.await() + tx.await() + kg.await()
         }
+        rememberQuery(q, result)
+        return result
     }
 
     /** 跨语言曲名兜底：只按规范艺人搜，匹配层再用时长认歌。同样并发。 */
@@ -154,5 +187,7 @@ class PlatformSearch(private val http: OkHttpClient) {
     companion object {
         const val UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        /** 搜索结果缓存有效期：覆盖一次播放会话，换源/重试基本零网络开销。 */
+        private const val QUERY_TTL_MS = 10 * 60_000L
     }
 }

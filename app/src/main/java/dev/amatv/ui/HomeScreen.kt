@@ -2,6 +2,7 @@ package dev.amatv.ui
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -110,6 +112,7 @@ fun HomeScreen(
     connectionState: MusicConnectionState = MusicConnectionState.Demo,
     setupMessage: String? = null,
     onSignIn: () -> Unit = {},
+    onPhoneSignIn: (() -> Unit)? = null,
     ytmSignedIn: Boolean = false,
     ytmPairing: GoogleTvPairing? = null,
     ytmPairingConfigured: Boolean = false,
@@ -125,10 +128,14 @@ fun HomeScreen(
     onAutoplaySourceChange: (dev.amatv.integration.AutoplaySource) -> Unit = {},
     lowPerformanceMode: Boolean = false,
     onLowPerformanceModeChange: (Boolean) -> Unit = {},
+    decoderMode: dev.amatv.integration.DecoderMode = dev.amatv.integration.DecoderMode.HARDWARE,
+    onDecoderModeChange: (dev.amatv.integration.DecoderMode) -> Unit = {},
+    ffmpegAvailable: Boolean = true,
     firstContentFocusRequester: FocusRequester? = null,
     navigationFocusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier,
     cacheSettingsContent: @Composable () -> Unit = {},
+    lyricSettingsContent: @Composable () -> Unit = {},
 ) {
     Column(modifier.fillMaxSize().automationId("browse-${destination.name.lowercase()}")) {
         when (destination) {
@@ -137,6 +144,7 @@ fun HomeScreen(
                     connectionState = connectionState,
                     setupMessage = setupMessage,
                     onSignIn = onSignIn,
+                    onPhoneSignIn = onPhoneSignIn,
                     ytmSignedIn = ytmSignedIn,
                     ytmPairing = ytmPairing,
                     ytmPairingConfigured = ytmPairingConfigured,
@@ -150,7 +158,11 @@ fun HomeScreen(
                     onAutoplaySourceChange = onAutoplaySourceChange,
                     lowPerformanceMode = lowPerformanceMode,
                     onLowPerformanceModeChange = onLowPerformanceModeChange,
+                    decoderMode = decoderMode,
+                    onDecoderModeChange = onDecoderModeChange,
+                    ffmpegAvailable = ffmpegAvailable,
                     cacheSettingsContent = cacheSettingsContent,
+                    lyricSettingsContent = lyricSettingsContent,
                     firstContentFocusRequester = firstContentFocusRequester,
                     navigationFocusRequester = navigationFocusRequester,
                 )
@@ -209,6 +221,7 @@ private fun AccountScreen(
     connectionState: MusicConnectionState,
     setupMessage: String?,
     onSignIn: () -> Unit,
+    onPhoneSignIn: (() -> Unit)? = null,
     ytmSignedIn: Boolean = false,
     ytmPairing: GoogleTvPairing? = null,
     ytmPairingConfigured: Boolean = false,
@@ -222,12 +235,17 @@ private fun AccountScreen(
     onAutoplaySourceChange: (dev.amatv.integration.AutoplaySource) -> Unit = {},
     lowPerformanceMode: Boolean = false,
     onLowPerformanceModeChange: (Boolean) -> Unit = {},
+    decoderMode: dev.amatv.integration.DecoderMode = dev.amatv.integration.DecoderMode.HARDWARE,
+    onDecoderModeChange: (dev.amatv.integration.DecoderMode) -> Unit = {},
+    ffmpegAvailable: Boolean = true,
     firstContentFocusRequester: FocusRequester?,
     navigationFocusRequester: FocusRequester?,
     headingOverride: String? = null,
     cacheSettingsContent: @Composable () -> Unit = {},
+    lyricSettingsContent: @Composable () -> Unit = {},
 ) {
     val primaryFocus = firstContentFocusRequester ?: remember { FocusRequester() }
+    val secondaryFocus = remember { FocusRequester() }
 
     Column(
         modifier = Modifier
@@ -259,12 +277,61 @@ private fun AccountScreen(
             }
         }
         Spacer(Modifier.height(6.dp))
-        // 音源接入：AM 登录栏已移除（点播全走落雪，Apple 仅元数据）；
-        // 第一个可聚焦元素改为下方设置项，导航 Down 的入口焦点仍可用。
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // Apple Music 账号区：未登录显示「在手机上登录」（上游二维码流程），
+        // 已登录显示「刷新 Apple Music 内容」+「从这台电视退出登录」。
+        // 登录只用于刷新「现在收听」/资料库数据；播放与播放记录不经过 Apple。
+        if (headingOverride == null) {
+            val phoneSignIn = onPhoneSignIn?.takeUnless { connectionState == MusicConnectionState.SignedIn }
+            Row(
+                modifier = Modifier.widthIn(
+                    max = if (connectionState == MusicConnectionState.SignedIn) 576.dp else 280.dp,
+                ),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AccountActionButton(
+                    label = stringResource(
+                        when {
+                            connectionState == MusicConnectionState.SignedIn -> R.string.browse_refresh_apple
+                            phoneSignIn != null -> R.string.phone_sign_in_title
+                            else -> R.string.browse_sign_in_tv
+                        },
+                    ),
+                    primary = true,
+                    onClick = when {
+                        connectionState == MusicConnectionState.SignedIn -> onRetry
+                        phoneSignIn != null -> phoneSignIn
+                        else -> onSignIn
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(primaryFocus)
+                        .focusProperties {
+                            if (navigationFocusRequester != null) up = navigationFocusRequester
+                            if (navigationFocusRequester != null) left = navigationFocusRequester
+                            right = if (connectionState == MusicConnectionState.SignedIn) {
+                                secondaryFocus
+                            } else {
+                                FocusRequester.Cancel
+                            }
+                        },
+                )
+                if (connectionState == MusicConnectionState.SignedIn) {
+                    AccountActionButton(
+                        label = stringResource(R.string.browse_sign_out_tv),
+                        primary = false,
+                        onClick = onSignOut,
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(secondaryFocus)
+                            .focusProperties {
+                                if (navigationFocusRequester != null) up = navigationFocusRequester
+                                left = primaryFocus
+                                right = FocusRequester.Cancel
+                            },
+                    )
+                }
+            }
         }
         if (headingOverride == null) {
             if (ytmPairingConfigured) {
@@ -303,152 +370,42 @@ private fun AccountScreen(
             }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(18.dp))
             Text(
                 text = stringResource(R.string.browse_lyrics_sync),
                 color = Color.White,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(
-                text = stringResource(R.string.browse_lyrics_sync_hint),
-                color = Color.White.copy(alpha = 0.72f),
-                fontSize = 16.sp,
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FocusSurface(
-                    onClick = { onLyricOffsetChange((lyricOffsetMs - 100L).coerceAtLeast(-3000L)) },
-                    modifier = Modifier
-                        .width(96.dp)
-                        .height(46.dp)
-                        .focusRequester(primaryFocus)
-                        .focusProperties {
-                            if (navigationFocusRequester != null) up = navigationFocusRequester
+            // v0.8.1：毫秒步进栏紧跟「歌词同步」标题；逐字歌词开关独立成块放后面
+            // （原先插在标题和步进栏之间，两块标题挤在一起视觉重叠）。
+            val earlierFocus = remember { FocusRequester() }
+            val laterFocus = remember { FocusRequester() }
+            LyricsTimingStepper(
+                lyricOffsetMs = lyricOffsetMs,
+                onLyricOffsetChange = onLyricOffsetChange,
+                earlierModifier = Modifier
+                    .focusRequester(earlierFocus)
+                    .then(
+                        if (connectionState == MusicConnectionState.Demo) {
+                            Modifier.focusRequester(primaryFocus)
+                        } else {
+                            Modifier
                         },
-                    cornerRadius = 23.dp,
-                    background = Color.White.copy(alpha = 0.14f),
-                    focusedBackground = Color.White.copy(alpha = 0.28f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(stringResource(R.string.browse_offset_value, -100), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                FocusSurface(
-                    onClick = { onLyricOffsetChange((lyricOffsetMs - 50L).coerceAtLeast(-3000L)) },
-                    modifier = Modifier.width(90.dp).height(46.dp),
-                    cornerRadius = 23.dp,
-                    background = Color.White.copy(alpha = 0.14f),
-                    focusedBackground = Color.White.copy(alpha = 0.28f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(stringResource(R.string.browse_offset_value, -50), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .height(46.dp)
-                        .clip(RoundedCornerShape(23.dp))
-                        .background(Color.White.copy(alpha = 0.22f))
-                        .padding(horizontal = 20.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = when {
-                            lyricOffsetMs > 0L -> stringResource(R.string.browse_offset_value, lyricOffsetMs)
-                            lyricOffsetMs < 0L -> stringResource(R.string.browse_offset_value, lyricOffsetMs)
-                            else -> stringResource(R.string.browse_offset_default)
-                        },
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
                     )
-                }
-                FocusSurface(
-                    onClick = { onLyricOffsetChange((lyricOffsetMs + 50L).coerceAtMost(3000L)) },
-                    modifier = Modifier.width(90.dp).height(46.dp),
-                    cornerRadius = 23.dp,
-                    background = Color.White.copy(alpha = 0.14f),
-                    focusedBackground = Color.White.copy(alpha = 0.28f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(stringResource(R.string.browse_offset_value, 50), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                FocusSurface(
-                    onClick = { onLyricOffsetChange((lyricOffsetMs + 100L).coerceAtMost(3000L)) },
-                    modifier = Modifier.width(96.dp).height(46.dp),
-                    cornerRadius = 23.dp,
-                    background = Color.White.copy(alpha = 0.14f),
-                    focusedBackground = Color.White.copy(alpha = 0.28f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(stringResource(R.string.browse_offset_value, 100), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                if (lyricOffsetMs != 0L) {
-                    FocusSurface(
-                        onClick = { onLyricOffsetChange(0L) },
-                        modifier = Modifier.height(46.dp),
-                        cornerRadius = 23.dp,
-                        background = Color.White.copy(alpha = 0.10f),
-                        focusedBackground = Color.White.copy(alpha = 0.25f),
-                        padding = PaddingValues(horizontal = 16.dp),
-                    ) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(stringResource(R.string.browse_reset), color = Color.White.copy(alpha = 0.85f), fontSize = 14.sp)
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            Text(
-                text = stringResource(R.string.browse_autoplay_source),
-                color = Color.White,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.SemiBold,
+                    .focusProperties {
+                        if (navigationFocusRequester != null) left = navigationFocusRequester
+                        right = laterFocus
+                    },
+                laterModifier = Modifier.focusRequester(laterFocus).focusProperties {
+                    left = earlierFocus
+                    right = FocusRequester.Cancel
+                },
+                modifier = Modifier.widthIn(max = 280.dp),
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val isYtm = autoplaySource == dev.amatv.integration.AutoplaySource.YouTubeMusic
-                FocusSurface(
-                    onClick = { onAutoplaySourceChange(dev.amatv.integration.AutoplaySource.YouTubeMusic) },
-                    modifier = Modifier.width(220.dp).height(46.dp),
-                    cornerRadius = 23.dp,
-                    background = if (isYtm) Color.White.copy(alpha = 0.26f) else Color.White.copy(alpha = 0.12f),
-                    focusedBackground = Color.White.copy(alpha = 0.38f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = if (isYtm) stringResource(R.string.browse_selected_source, stringResource(R.string.browse_ytm_name)) else stringResource(R.string.browse_ytm_name),
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = if (isYtm) FontWeight.Bold else FontWeight.Medium,
-                        )
-                    }
-                }
-                val isAm = autoplaySource == dev.amatv.integration.AutoplaySource.AppleMusic
-                FocusSurface(
-                    onClick = { onAutoplaySourceChange(dev.amatv.integration.AutoplaySource.AppleMusic) },
-                    modifier = Modifier.width(220.dp).height(46.dp),
-                    cornerRadius = 23.dp,
-                    background = if (isAm) Color.White.copy(alpha = 0.26f) else Color.White.copy(alpha = 0.12f),
-                    focusedBackground = Color.White.copy(alpha = 0.38f),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = if (isAm) stringResource(R.string.browse_selected_source, stringResource(R.string.browse_apple_name)) else stringResource(R.string.browse_apple_name),
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = if (isAm) FontWeight.Bold else FontWeight.Medium,
-                        )
-                    }
-                }
-            }
+            Spacer(Modifier.height(2.dp))
+            // v0.6: 逐字歌词开关（LyricSettings 自带分区标题），紧随歌词同步之后。
+            lyricSettingsContent()
             Spacer(Modifier.height(18.dp))
             Text(
                 text = stringResource(R.string.browse_performance_mode),
@@ -498,8 +455,169 @@ private fun AccountScreen(
                     }
                 }
             }
+            Spacer(Modifier.height(18.dp))
+            // v0.8: 软解/硬解切换（veil.music 同款）。切换立即重建落雪播放器（同曲同位续播）。
+            Text(
+                text = stringResource(R.string.browse_decoder_mode),
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FocusSurface(
+                    onClick = { onDecoderModeChange(dev.amatv.integration.DecoderMode.HARDWARE) },
+                    modifier = Modifier.width(220.dp).height(46.dp),
+                    cornerRadius = 23.dp,
+                    background = if (decoderMode == dev.amatv.integration.DecoderMode.HARDWARE) Color.White.copy(alpha = 0.26f) else Color.White.copy(alpha = 0.12f),
+                    focusedBackground = Color.White.copy(alpha = 0.38f),
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (decoderMode == dev.amatv.integration.DecoderMode.HARDWARE) stringResource(R.string.browse_selected_source, stringResource(R.string.browse_decoder_hw)) else stringResource(R.string.browse_decoder_hw),
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = if (decoderMode == dev.amatv.integration.DecoderMode.HARDWARE) FontWeight.Bold else FontWeight.Medium,
+                        )
+                    }
+                }
+                FocusSurface(
+                    onClick = { onDecoderModeChange(dev.amatv.integration.DecoderMode.SOFTWARE) },
+                    modifier = Modifier.width(220.dp).height(46.dp),
+                    cornerRadius = 23.dp,
+                    background = if (decoderMode == dev.amatv.integration.DecoderMode.SOFTWARE) Color.White.copy(alpha = 0.26f) else Color.White.copy(alpha = 0.12f),
+                    focusedBackground = Color.White.copy(alpha = 0.38f),
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (decoderMode == dev.amatv.integration.DecoderMode.SOFTWARE) stringResource(R.string.browse_selected_source, stringResource(R.string.browse_decoder_sw)) else stringResource(R.string.browse_decoder_sw),
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = if (decoderMode == dev.amatv.integration.DecoderMode.SOFTWARE) FontWeight.Bold else FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+            Text(
+                text = when {
+                    decoderMode == dev.amatv.integration.DecoderMode.SOFTWARE && !ffmpegAvailable ->
+                        stringResource(R.string.browse_decoder_sw_unavailable)
+                    decoderMode == dev.amatv.integration.DecoderMode.SOFTWARE ->
+                        stringResource(R.string.browse_decoder_sw_hint)
+                    else -> stringResource(R.string.browse_decoder_hw_hint)
+                },
+                color = Color.White.copy(alpha = 0.72f),
+                fontSize = 16.sp,
+            )
         }
         cacheSettingsContent()
+    }
+}
+
+@Composable
+private fun lyricsTimingValue(offsetMs: Long): String {
+    val delayMs = lyricsTimingDelayMs(offsetMs)
+    return if (delayMs == 0L) {
+        stringResource(R.string.browse_lyrics_sync_zero)
+    } else {
+        stringResource(R.string.browse_lyrics_sync_delta, delayMs)
+    }
+}
+
+/** Upstream-style lyrics timing control: a single - / + pair with a delay label. */
+@Composable
+private fun LyricsTimingStepper(
+    lyricOffsetMs: Long,
+    onLyricOffsetChange: (Long) -> Unit,
+    earlierModifier: Modifier,
+    laterModifier: Modifier,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LyricsTimingStep(-LyricsTimingStepMs, earlierModifier.automationId("lyrics-timing-earlier")) {
+            onLyricOffsetChange(offsetAfterLyricsTimingStep(lyricOffsetMs, -LyricsTimingStepMs))
+        }
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = lyricsTimingValue(lyricOffsetMs),
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.automationId("lyrics-timing-value"),
+            )
+            Text(
+                text = stringResource(
+                    when {
+                        lyricOffsetMs > 0L -> R.string.browse_lyrics_sync_earlier
+                        lyricOffsetMs < 0L -> R.string.browse_lyrics_sync_later
+                        else -> R.string.browse_lyrics_sync_default
+                    },
+                ),
+                color = Color.White.copy(alpha = 0.68f),
+                fontSize = 12.sp,
+            )
+        }
+        LyricsTimingStep(LyricsTimingStepMs, laterModifier.automationId("lyrics-timing-later")) {
+            onLyricOffsetChange(offsetAfterLyricsTimingStep(lyricOffsetMs, LyricsTimingStepMs))
+        }
+    }
+}
+
+@Composable
+private fun LyricsTimingStep(delayStepMs: Long, modifier: Modifier, onClick: () -> Unit) {
+    val description = stringResource(
+        if (delayStepMs < 0) R.string.browse_lyrics_sync_earlier_step
+        else R.string.browse_lyrics_sync_later_step,
+        LyricsTimingStepMs,
+    )
+    FocusSurface(
+        onClick = onClick,
+        modifier = modifier.width(60.dp).height(44.dp).semantics { contentDescription = description },
+        cornerRadius = 14.dp,
+        background = Color.White.copy(alpha = 0.10f),
+        focusedBackground = Color(0xFFEBEBEB),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = stringResource(R.string.browse_lyrics_sync_delta, delayStepMs),
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AccountActionButton(
+    label: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier,
+) {
+    FocusSurface(
+        onClick = onClick,
+        modifier = modifier.height(52.dp),
+        cornerRadius = 12.dp,
+        focusedScale = 1.025f,
+        background = Color.White.copy(alpha = if (primary) 0.18f else 0.10f),
+        focusedBackground = Color.White.copy(alpha = 1f),
+        padding = PaddingValues(horizontal = 20.dp),
+    ) { focused ->
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = label,
+                color = if (focused) Color(0xFF171717) else Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 

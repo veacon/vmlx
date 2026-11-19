@@ -51,6 +51,22 @@ data class Track(
 )
 
 /**
+ * Palette normalised for gradient shaders.
+ *
+ * Compose throws IllegalArgumentException("colors must have length of at least 2
+ * if colorStops is omitted") for every linear/radial gradient built from fewer
+ * than two colors. Imported (QQ / Netease / Kugou) tracks carry a single grey
+ * color, and playlists persisted before this guard was added still hold one, so
+ * every gradient must go through this accessor instead of [Track.palette].
+ */
+val Track.gradientPalette: List<Color>
+    get() = when {
+        palette.size >= 2 -> palette
+        palette.size == 1 -> listOf(palette[0], palette[0])
+        else -> listOf(Color(0xFF202428), Color(0xFF121417))
+    }
+
+/**
  * Compares two projections of the same live playback-queue entry.
  *
  * MusicKit can expose the now-playing item and the matching queue item with

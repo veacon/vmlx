@@ -16,6 +16,13 @@
     <string name="browse_ytm_sign_out">Sign Out of YouTube Music</string>
     <string name="browse_ytm_pair">Pair YouTube Music</string>
     <string name="browse_lyrics_sync">Lyrics Sync</string>
+    <string name="browse_lyrics_sync_zero">0 ms</string>
+    <string name="browse_lyrics_sync_delta">%1$+d ms</string>
+    <string name="browse_lyrics_sync_earlier">Earlier</string>
+    <string name="browse_lyrics_sync_later">Later</string>
+    <string name="browse_lyrics_sync_default">Default</string>
+    <string name="browse_lyrics_sync_earlier_step">Show lyrics %1$d ms earlier</string>
+    <string name="browse_lyrics_sync_later_step">Show lyrics %1$d ms later</string>
     <string name="browse_lyrics_sync_hint">Delay lyrics if they appear early, or advance them if they appear late.</string>
     <string name="browse_offset_value">%1$+d ms</string>
     <string name="browse_offset_default">0 ms (Default)</string>
@@ -25,6 +32,12 @@
     <string name="browse_performance_mode_hint">Disable animated artwork video to ensure smooth playback on older TV hardware.</string>
     <string name="browse_performance_standard">Standard</string>
     <string name="browse_performance_low">Low Spec Mode</string>
+    <string name="browse_decoder_mode">Audio Decoder</string>
+    <string name="browse_decoder_hw">Hardware</string>
+    <string name="browse_decoder_sw">Software</string>
+    <string name="browse_decoder_hw_hint">System decoder; switch to software if audio crackles.</string>
+    <string name="browse_decoder_sw_hint">Built-in FFmpeg decoder — the most consistent.</string>
+    <string name="browse_decoder_sw_unavailable">FFmpeg is unavailable on this device; software decoding falls back to the system decoder.</string>
     <string name="browse_ytm_name">YouTube Music</string>
     <string name="browse_apple_name">Apple Music</string>
     <string name="browse_selected_source">✓ %1$s</string>

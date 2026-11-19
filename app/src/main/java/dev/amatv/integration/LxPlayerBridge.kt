@@ -10,6 +10,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import dev.amatv.luoxue.AudioStream
 import dev.amatv.luoxue.LxPlayback
@@ -43,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLong
 class LxPlayerBridge(
     private val context: Context,
     private val lx: LxPlayback,
+    initialDecoderMode: DecoderMode = DecoderMode.DEFAULT,
 ) {
     companion object {
         private const val TAG = "AmAtvLxPlayer"
@@ -52,6 +54,12 @@ class LxPlayerBridge(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prepareGeneration = AtomicLong(0L)
+
+    /**
+     * v0.8: decoder path (veil.music DecoderMode). Read when the player is built;
+     * [applyDecoderMode] rebuilds a live player in place so the switch is immediate.
+     */
+    @Volatile private var decoderMode: DecoderMode = initialDecoderMode
 
     @Volatile private var playbackListener: ((PlaybackSnapshot) -> Unit)? = null
     @Volatile private var requestedTrack: Track? = null
@@ -86,7 +94,18 @@ class LxPlayerBridge(
     private fun ensurePlayer(): ExoPlayer? {
         if (player == null) {
             player = runCatching {
-                ExoPlayer.Builder(context)
+                // v0.8: 软解/硬解切换（veil 同款）。硬解 = 仅平台 MediaCodec；
+                // 软解 = FFmpeg 扩展渲染器优先（缺原生库时静默回落系统解码）。
+                val renderersFactory = DefaultRenderersFactory(context)
+                    .setExtensionRendererMode(
+                        if (decoderMode == DecoderMode.HARDWARE) {
+                            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
+                        } else {
+                            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                        },
+                    )
+                    .setEnableDecoderFallback(true)
+                ExoPlayer.Builder(context, renderersFactory)
                     .setAudioAttributes(
                         AudioAttributes.Builder()
                             .setUsage(C.USAGE_MEDIA)
@@ -96,7 +115,10 @@ class LxPlayerBridge(
                     )
                     .setHandleAudioBecomingNoisy(true)
                     .build()
-                    .also { it.addListener(playerListener) }
+                    .also {
+                        it.addListener(playerListener)
+                        Log.i(TAG, "Player built decoder=${decoderMode.key} (${FfmpegSupport.describe()})")
+                    }
             }.onFailure { Log.e(TAG, "ExoPlayer create failed", it) }.getOrNull()
         }
         return player
@@ -299,6 +321,43 @@ class LxPlayerBridge(
             }
         }
         return true
+    }
+
+    /**
+     * v0.8: decoder switch (veil.music's setDecoderMode). The decoder is picked when a
+     * player is built, so a live player is rebuilt in place: position and play/pause
+     * intent are captured first, the same already-resolved stream is re-prepared at the
+     * same offset on the new decoder path. No re-resolve, no queue churn - the switch is
+     * observable immediately instead of "from the next song". When nothing is playing the
+     * mode just takes effect on the next preparePlayback.
+     */
+    @Synchronized
+    fun applyDecoderMode(mode: DecoderMode) {
+        if (mode == decoderMode) return
+        decoderMode = mode
+        Log.i(TAG, "Decoder mode -> ${mode.key} (${FfmpegSupport.describe()})")
+        val track = requestedTrack ?: return
+        val stream = currentStream ?: return
+        if (prepareGeneration.get() != activeGeneration) return
+        val positionMs = player?.currentPosition?.coerceAtLeast(0L) ?: resumePositionMs
+        val wasPlaying = desiredPlaying
+        val generation = activeGeneration
+        prepared = false
+        ended = false
+        val old = player
+        player = null
+        currentStream = stream
+        mainHandler.post { runCatching { old?.release() } }
+        mainHandler.post {
+            if (prepareGeneration.get() != generation || generation != activeGeneration) return@post
+            val p = ensurePlayer() ?: return@post
+            p.setMediaItem(buildMediaItem(track.toLxSong(), stream), positionMs)
+            p.prepare()
+            p.playWhenReady = wasPlaying
+            prepared = true
+            Log.i(TAG, "Decoder rebuild ok generation=$generation mode=${mode.key} pos=${positionMs}ms")
+            dispatchSnapshot()
+        }
     }
 
     /** 直链 TTL≈21 分钟：过期/403 时重解析一次并保持进度（veil 同款防死循环标记）。 */

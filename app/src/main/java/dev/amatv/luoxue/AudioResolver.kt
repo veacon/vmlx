@@ -54,8 +54,27 @@ class AudioResolver(
         private const val MIN_COMPLETE_BYTES = 1_800_000L
         /** 单个脚本最多试几档音质：脚本内部已自带降级，多试只会重复跑后端的慢请求。 */
         private const val MAX_QUALITY_TRIES = 2
-        /** 单曲解析总预算：P0 最坏 40s 不可接受，超时即放弃并交给上层换源/跳过。 */
-        private const val TOTAL_BUDGET_MS = 40_000L
+        /** v0.7：候选池上限（每源 top2，防止串行脚本级联因候选过多被放大）。 */
+        private const val MAX_CANDIDATES = 5
+        /**
+         * 单曲解析总预算：P0 最坏 40s 不可接受，超时即放弃并交给上层换源/跳过。
+         * v0.7 降到 26s——实测主力脚本（kulao/hyw/fish）命中都在 3s 内，
+         * 26s 足够跑完一轮主力脚本级联；再长只会让失败曲目白等，拉长首播感知。
+         */
+        private const val TOTAL_BUDGET_MS = 26_000L
+
+        /**
+         * v0.7：纯函数形式的可用性判断（供单元测试直接验证）。
+         * 原则：probe.ok 已保证魔数是真实音频容器，未知信息不能当成失败证据。
+         */
+        internal fun isAcceptableStream(probe: StreamVerifier.Probe, minKbps: Int): Boolean {
+            if (!probe.ok) return false
+            if (probe.kind == "flac" || probe.kind == "flac24bit") return true
+            if (probe.kbps > 0) return probe.kbps >= minKbps || probe.bytes >= MIN_COMPLETE_BYTES
+            if (probe.bytes > 0) return probe.bytes >= MIN_COMPLETE_BYTES
+            // 码率与长度都未知：魔数已验证，接受，避免误杀 chunked 完整曲目。
+            return true
+        }
     }
 
     private var resolvedCount = 0
@@ -96,7 +115,18 @@ class AudioResolver(
             return@withContext ResolveResult(null, attempts, null, System.currentTimeMillis() - t0)
         }
 
-        val shortlist = ranked.distinctBy { it.source }.take(3)
+        /**
+         * v0.7：每平台保留 top2 候选（原先 distinctBy 后每源仅 1 个）。
+         * 搜索排序难免把同名不同版本/id 失效的候选排第一；旧的"每源只试一个"
+         * 会因为单个坏候选让整首歌判为未命中。每源 2 个只在第一候选的脚本
+         * 级联全败时才多花一次，正常命中路径零额外开销。
+         */
+        val shortlist = ranked
+            .groupBy { it.source }
+            .values
+            .flatMap { it.take(2) }
+            .sortedByDescending { it.score }
+            .take(MAX_CANDIDATES)
         onStep("命中 ${shortlist.joinToString { "${it.source}:${it.score}" }}")
 
         for (cand in shortlist) {
@@ -165,17 +195,17 @@ class AudioResolver(
     }
 
     /**
-     * 试听片段 vs 完整曲目：
-     *  - flac 直接接受；
-     *  - 码率已知时按 [minKbps] 门槛（低码率试听被挡，宁可换源）；
-     *  - 码率未知（脚本普遍不返回 bitrate；文本导入的歌也没有时长）时按文件体积判断：
-     *    30 秒试听一般 < 1.5MB，完整曲目普遍 > 2MB。这块之前直接按 0kbps 拒掉，
-     *    导致 5MB 的正常 mp3 被误杀。
+     * v0.7：可用性判断重写。历史 bug——码率/长度拿不到时（CDN chunked、不发
+     * Content-Range、文本导入歌无时长）直接按 0kbps 拒，误杀大量正常完整曲目。
+     * 修正原则：probe.ok 已保证魔数是真实音频容器，未知信息不应反过来当成"失败证据"：
+     *  - flac / flac24bit：直接接受；
+     *  - 码率已知：达 [minKbps] 即接受；码率偏低但体积>=完整阈值（时长元数据误差
+     *    导致的低算）也接受；明显低于门槛且是小文件才判为试听片段；
+     *  - 码率未知但有长度：按体积区分完整曲目 / 30 秒试听；
+     *  - 码率与长度都未知：魔数已验证，接受（宁可交给播放器，不误杀）。
      */
     private fun acceptable(probe: StreamVerifier.Probe, minKbps: Int): Boolean =
-        probe.kind == "flac" || probe.kind == "flac24bit" ||
-            probe.kbps >= minKbps ||
-            (probe.kbps <= 0 && probe.bytes >= MIN_COMPLETE_BYTES)
+        isAcceptableStream(probe, minKbps)
 
     private fun musicInfo(
         cand: Candidate,

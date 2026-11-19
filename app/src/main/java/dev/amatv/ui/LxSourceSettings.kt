@@ -195,6 +195,33 @@ internal fun NowPlayingLabelSettings(
 }
 
 @Composable
+/**
+ * v0.6 P0：「逐字歌词」设置开关。
+ *
+ * 打开：活跃歌词行按字逐字点亮（v0.5 的 karaoke word-wipe，LRC 行级时间按 CJK 字符 /
+ * 西文单词均分）。关闭：回落整行高亮，即「取消逐字」。与 v0.4/v0.5 行为对齐，默认关闭。
+ */
+internal fun LyricSettings(
+    wordWipeEnabled: Boolean,
+    onWordWipeToggle: (Boolean) -> Unit,
+) {
+    Spacer(Modifier.height(16.dp))
+    Text("逐字歌词", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "开启后当前歌词行会按字逐字点亮；关闭则取消逐字、整行高亮。",
+        color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp,
+    )
+    Spacer(Modifier.height(10.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        SettingsPillButton(
+            label = if (wordWipeEnabled) "逐字歌词：开" else "逐字歌词：关",
+            onClick = { onWordWipeToggle(!wordWipeEnabled) },
+            modifier = Modifier.width(300.dp),
+        )
+    }
+}
+
+@Composable
 private fun SettingsPillButton(
     label: String,
     onClick: () -> Unit,

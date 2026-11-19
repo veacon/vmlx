@@ -36,13 +36,17 @@ class LxPlayback(
 ) {
 
     companion object {
-        /** 直链实测 TTL ≈21 分钟，留足余量。 */
-        private const val CACHE_TTL_MS = 12 * 60_000L
-        private const val CACHE_MAX = 24
+        /**
+         * 直链实测 TTL ≈21 分钟。v0.7 从 12 分钟放宽到 16 分钟：
+         * 仍在有效期余量内（16+切歌重解析的长尾 < 21），让切回/列表循环
+         * 更多命中缓存、少走一次完整解析。
+         */
+        private const val CACHE_TTL_MS = 16 * 60_000L
+        private const val CACHE_MAX = 32
         /** 并发启动 QuickJS 脚本的批大小：4 个一批，兼顾电视盒子的 CPU/内存。 */
         private const val ENGINE_INIT_PARALLELISM = 4
         /** v0.4：负结果缓存 TTL，避免单曲反复卡 40s 预算阻塞播放队列。 */
-        private const val NEG_CACHE_TTL_MS = 30_000L
+        private const val NEG_CACHE_TTL_MS = 15_000L
     }
 
     private val http: OkHttpClient by lazy {
@@ -352,7 +356,13 @@ class LxPlayback(
     }
 
     /** 解析一首歌；[force] 跳过缓存（直链过期重试）；[excludeScript] 换源时跳过当前命中的脚本。 */
-    suspend fun resolve(song: Song, force: Boolean = false, excludeScript: String? = null): AudioStream? {
+    suspend fun resolve(
+        song: Song,
+        force: Boolean = false,
+        excludeScript: String? = null,
+        /** 后台预取传入 false：预取的一次失败不应写负缓存挡住用户接下来的主动点播。 */
+        recordNeg: Boolean = true,
+    ): AudioStream? {
         if (!isEnabled()) return null
         songs[song.id] = song
         if (!force && excludeScript == null) cached(song.id)?.let { stream ->
@@ -372,11 +382,12 @@ class LxPlayback(
         }
         if (force || excludeScript != null) negCache.remove(song.id)
         val job = synchronized(inflight) {
-            inflight[song.id] ?: scope.async { doResolve(song, excludeScript)?.let { hit ->
-                negCache.remove(song.id)
-                hit
-            }.also { if (it == null) rememberNeg(song.id) }
-        }.also { inflight[song.id] = it }
+            inflight[song.id] ?: scope.async {
+                doResolve(song, excludeScript)?.let { hit ->
+                    negCache.remove(song.id)
+                    hit
+                }.also { if (it == null && recordNeg) rememberNeg(song.id) }
+            }.also { inflight[song.id] = it }
         }
         return try {
             job.await()
@@ -395,7 +406,8 @@ class LxPlayback(
         if (!isEnabled()) return
         if (cached(song.id) != null) return
         songs[song.id] = song
-        scope.launch { runCatching { resolve(song) } }
+        // recordNeg=false：预取失败不写负缓存，用户主动点播时仍会真正重解析。
+        scope.launch { runCatching { resolve(song, recordNeg = false) } }
     }
 
     private suspend fun doResolve(song: Song, excludeScript: String? = null): AudioStream? = try {

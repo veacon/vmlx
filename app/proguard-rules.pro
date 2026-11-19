@@ -3,6 +3,10 @@
 -keep class com.apple.** { *; }
 -keep class dev.amatv.integration.MusicKitTokenProvider { *; }
 
+# Local FFmpeg jar (v0.8 software decode) has no bundled consumer rules;
+# its JNI library resolves these names by symbol.
+-keep class androidx.media3.decoder.ffmpeg.** { *; }
+
 # Optional desktop JavaCPP build-tool/logging integrations bundled in the SDK;
 # Android playback does not load Maven plugins or the SLF4J backend.
 -dontwarn org.apache.maven.plugins.annotations.Mojo

@@ -80,6 +80,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -161,6 +162,7 @@ private enum class PlayerControl {
     Previous,
     PlayPause,
     Next,
+    Quality,
     Lyrics,
     Queue,
     SourcePanel,
@@ -215,6 +217,12 @@ fun PlayerScreen(
     lyricsSourceLabel: String? = null,
     /** 缓冲态（LX 解析/缓冲中）：驱动进度条流动动画。 */
     isBuffering: Boolean = false,
+    /** v0.6 P0：逐字歌词开关。true = 活跃行按字逐字点亮（v0.5 karaoke word-wipe）；false = 回落整行高亮。 */
+    lyricWordWipeEnabled: Boolean = false,
+    /** v0.6：当前音质档位（控制条胶囊展示 + 切换浮层）。 */
+    audioQuality: dev.amatv.luoxue.AudioQuality = dev.amatv.luoxue.AudioQuality.DEFAULT,
+    /** v0.6：选择音质档位（切档即时清解析缓存，下一首生效）。 */
+    onSetQuality: (dev.amatv.luoxue.AudioQuality) -> Unit = {},
     /** 「歌曲换源」：跳过当前命中脚本强制重解析。 */
     onSwitchSource: () -> Unit = {},
     /** 「歌词换源」：排除当前命中源后重走级联。 */
@@ -233,6 +241,8 @@ fun PlayerScreen(
     var showQueue by remember(queueSessionId) { mutableStateOf(false) }
     // v0.2 菜单键音源面板：遥控器 Menu 键 / 控制条「音源」按钮呼出。
     var showSourcePanel by remember(queueSessionId) { mutableStateOf(false) }
+    // v0.6: 音质切换浮层（控制条「下一首」右侧胶囊呼出）。
+    var showQualityPicker by remember(queueSessionId) { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsActivity by remember { mutableIntStateOf(0) }
     var navigationZone by remember(queueSessionId) {
@@ -257,6 +267,8 @@ fun PlayerScreen(
             }
             add(PlayerControl.Queue)
             add(PlayerControl.SourcePanel)
+            // v0.6.4: Quality pill moved to the far right of the control bar.
+            add(PlayerControl.Quality)
         }
     }
     LaunchedEffect(availableControls) {
@@ -445,6 +457,9 @@ fun PlayerScreen(
                                     PlayerControl.Previous -> onSkipPrevious()
                                     PlayerControl.PlayPause -> onTogglePlayback()
                                     PlayerControl.Next -> onSkipNext()
+                                    PlayerControl.Quality -> {
+                                        showQualityPicker = true
+                                    }
                                     PlayerControl.Lyrics -> {
                                         userToggledLyrics = true
                                         if (lyricsTransientFailure && track.lyrics.isEmpty()) {
@@ -634,6 +649,7 @@ fun PlayerScreen(
             focusedQueueIndex = focusedQueueIndex,
             selectionVisible = navigationZone == PlayerNavigationZone.QueueItems,
             lowPerformanceMode = lowPerformanceMode,
+            lyricWordWipeEnabled = lyricWordWipeEnabled,
             modifier = Modifier.fillMaxSize(),
         )
         // v0.2：常驻音源角标已移除（遮挡且不可交互），音源信息改由菜单键面板展示。
@@ -777,6 +793,12 @@ fun PlayerScreen(
                                 focusedControl == PlayerControl.SourcePanel,
                             width = 46.dp,
                         )
+                        // v0.6.4：音质胶囊——挪到右侧控制组最右端，展示当前档位短名。
+                        QualityPillButton(
+                            quality = audioQuality,
+                            focused = navigationZone == PlayerNavigationZone.Controls &&
+                                focusedControl == PlayerControl.Quality,
+                        )
                         }
                     }
                 }
@@ -800,6 +822,17 @@ fun PlayerScreen(
                     onSwitchLyricsSource()
                 },
                 onDismiss = { showSourcePanel = false },
+            )
+        }
+
+        if (showQualityPicker) {
+            QualityPickerDialog(
+                current = audioQuality,
+                onSelect = { q ->
+                    showQualityPicker = false
+                    onSetQuality(q)
+                },
+                onDismiss = { showQualityPicker = false },
             )
         }
 
@@ -1112,6 +1145,139 @@ private fun PlayerButton(
     }
 }
 
+/** Short label shown on the control-bar quality capsule (fits a 46.dp pill). */
+private fun dev.amatv.luoxue.AudioQuality.shortLabel(): String = when (this) {
+    dev.amatv.luoxue.AudioQuality.STANDARD -> "128k"
+    dev.amatv.luoxue.AudioQuality.MEDIUM -> "192k"
+    dev.amatv.luoxue.AudioQuality.HIGH -> "320k"
+    dev.amatv.luoxue.AudioQuality.LOSSLESS -> "FLAC"
+    dev.amatv.luoxue.AudioQuality.HIRES -> "HiRes"
+}
+
+/**
+ * v0.6: quality capsule next to "next track". Same 46x40 size as skip buttons,
+ * shows the active grade short name. Focus/click is driven by the logical
+ * [PlayerControl.Quality] state at the top-level key handler, same as other buttons.
+ */
+@Composable
+private fun QualityPillButton(
+    quality: dev.amatv.luoxue.AudioQuality,
+    focused: Boolean,
+) {
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.08f else 1.0f,
+        animationSpec = tween(180, easing = ArtworkDecelerateEasing),
+        label = "player-quality-scale",
+    )
+    Box(
+        modifier = Modifier
+            .automationId("player-quality")
+            .semantics { stateDescription = "音质 ${quality.label}" }
+            .size(width = 46.dp, height = 40.dp)
+            .focusFrameTarget(focused, "player-control:player-quality", 20.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale },
+        contentAlignment = Alignment.Center,
+    ) {
+        // v0.6.4: 去掉胶囊底色，仅靠焦点框 + 缩放 + 文字加亮体现选中态。
+        Text(
+            text = quality.shortLabel(),
+            color = if (focused) Color.White else Color.White.copy(alpha = 0.92f),
+            fontSize = 12.sp,
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * v0.6: quality picker dialog. Options mirror veil.music's AudioQuality ladder
+ * (128k / 192k / 320k / FLAC / Hi-Res); each row shows label + hint, current grade
+ * is marked. Fully remote-navigable via FocusSurface + auto-focus on the current row.
+ */
+@Composable
+private fun QualityPickerDialog(
+    current: dev.amatv.luoxue.AudioQuality,
+    onSelect: (dev.amatv.luoxue.AudioQuality) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val options = dev.amatv.luoxue.AudioQuality.entries
+    val focusRequesters = remember { List(options.size) { FocusRequester() } }
+    val currentIndex = options.indexOf(current).coerceAtLeast(0)
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        runCatching { focusRequesters[currentIndex].requestFocus() }
+    }
+    CompositionLocalProvider(LocalFocusFrameEnabled provides false) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = {
+                Text("音质", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+            },
+            text = {
+                Column(
+                    modifier = Modifier.width(460.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    options.forEachIndexed { index, q ->
+                        val isCurrent = q == current
+                        FocusSurface(
+                            onClick = { onSelect(q) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(58.dp)
+                                .focusRequester(focusRequesters[index])
+                                .focusProperties {
+                                    up = focusRequesters.getOrNull(index - 1) ?: FocusRequester.Cancel
+                                    down = focusRequesters.getOrNull(index + 1) ?: FocusRequester.Cancel
+                                },
+                            cornerRadius = 14.dp,
+                            showBorder = true,
+                            padding = PaddingValues(horizontal = 16.dp),
+                            background = Color.White.copy(alpha = if (isCurrent) 0.16f else 0.06f),
+                            focusedBackground = Color.White.copy(alpha = 0.24f),
+                        ) {
+                            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+                                Text(
+                                    q.label + if (isCurrent) "  (当前)" else "",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    q.hint,
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 12.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                FocusSurface(
+                    onClick = onDismiss,
+                    modifier = Modifier.width(112.dp).height(42.dp),
+                    cornerRadius = 21.dp,
+                    background = Color.White.copy(alpha = 0.12f),
+                    focusedBackground = Color.White,
+                ) { focused ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            "关闭",
+                            color = if (focused) Color(0xFF18181A) else Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            },
+            containerColor = Color(0xFF252529),
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
+        )
+    }
+}
+
 @Composable
 private fun LyricsLanguageSummaryRow(title: String, value: String) {
     Row(
@@ -1203,6 +1369,7 @@ private fun PlayerStage(
     focusedQueueIndex: Int,
     selectionVisible: Boolean,
     lowPerformanceMode: Boolean = false,
+    lyricWordWipeEnabled: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
@@ -1321,6 +1488,7 @@ private fun PlayerStage(
                         selectedLyricIndex = selectedLyricIndex,
                         manualScrollTrigger = manualScrollTrigger,
                         manualScrollDelta = manualScrollDelta,
+                        lyricWordWipeEnabled = lyricWordWipeEnabled,
                     )
                 } else {
                     LyricsUnavailablePanel(
@@ -1509,17 +1677,21 @@ private fun ArtistWithAudioBands(
                 compact = compact,
             )
         }
-        if (showBands) {
-            Spacer(Modifier.width(if (compact) 6.dp else 7.dp))
-            AudioBandIndicator(
-                isPlaying = isPlaying,
-                audioSpectrum = audioSpectrum,
-                enabled = bandsEnabled,
-                modifier = Modifier
-                    .size(if (compact) 12.dp else 13.dp, if (compact) 10.dp else 12.dp)
-                    .alignBy { it.measuredHeight },
-            )
-        }
+        // v0.7.3: 歌手名右侧的 AudioBandIndicator（音频频谱三竖条）已移除——
+        // 静音/无数据时三根竖条收缩成"···"三个小圆点，被用户当成播放器界面的残留。
+        // 歌词间奏的"• • •"是另一套功能（InstrumentalInterludeRow），保持不变。
+        // 组件文件 AudioBandIndicator.kt 保留，如需恢复直接把下面这段注释放开即可。
+        // if (showBands) {
+        //     Spacer(Modifier.width(if (compact) 6.dp else 7.dp))
+        //     AudioBandIndicator(
+        //         isPlaying = isPlaying,
+        //         audioSpectrum = audioSpectrum,
+        //         enabled = bandsEnabled,
+        //         modifier = Modifier
+        //             .size(if (compact) 12.dp else 13.dp, if (compact) 10.dp else 12.dp)
+        //             .alignBy { it.measuredHeight },
+        //     )
+        // }
     }
 }
 
@@ -1778,6 +1950,7 @@ private fun LyricsPanel(
     selectedLyricIndex: Int? = null,
     manualScrollTrigger: Int = 0,
     manualScrollDelta: Float = 0f,
+    lyricWordWipeEnabled: Boolean = false,
 ) {
     val isStaticMode = remember(lines) { lines.all { it.isStatic } }
     val effectiveLyricPositionState = remember(positionState, lyricOffsetMs) {
@@ -2126,6 +2299,7 @@ private fun LyricsPanel(
                 selectedLyricIndex = selectedLyricIndex,
                 isStaticMode = isStaticMode,
                 isUserScrolling = isUserScrolling,
+                lyricWordWipeEnabled = lyricWordWipeEnabled,
             )
             if (currentGap != null) {
                 key("instrumental-slot-${currentGap.beforeLineIndex}-${currentGap.startMs}") {
@@ -2138,6 +2312,7 @@ private fun LyricsPanel(
                     }
                 }
             }
+
         }
     }
 }
@@ -2202,6 +2377,7 @@ private fun LyricsRows(
     selectedLyricIndex: Int?,
     isStaticMode: Boolean,
     isUserScrolling: Boolean,
+    lyricWordWipeEnabled: Boolean = false,
 ) {
     mountedRowsState.value.sorted().forEach { index ->
         val item = displayItems.getOrNull(index) ?: return@forEach
@@ -2221,6 +2397,7 @@ private fun LyricsRows(
                     isFocused = selectedLyricIndex == item.lineIndex,
                     isStaticMode = isStaticMode,
                     isUserScrolling = isUserScrolling,
+                    lyricWordWipeEnabled = lyricWordWipeEnabled,
                 )
                 is LyricsDisplayItem.Songwriters -> SongwritersFooterRow(item.text)
             }
@@ -2243,6 +2420,7 @@ private fun LyricsLineRow(
     isFocused: Boolean,
     isStaticMode: Boolean,
     isUserScrolling: Boolean,
+    lyricWordWipeEnabled: Boolean = false,
 ) {
     // Only the singers entering/leaving a cluster restart their expensive text
     // subtree. Other rows retain the same State objects and measured flexboxes.
@@ -2319,6 +2497,7 @@ private fun LyricsLineRow(
         isStaticMode = isStaticMode,
         isUserScrolling = isUserScrolling,
         positionState = positionState,
+        lyricWordWipeEnabled = lyricWordWipeEnabled,
     )
 }
 
@@ -2628,6 +2807,7 @@ private fun KaraokeLyricLine(
     isStaticMode: Boolean,
     isUserScrolling: Boolean,
     positionState: State<Long>,
+    lyricWordWipeEnabled: Boolean = false,
 ) {
     val hasMainPronunciation = !line.pronunciationText.isNullOrBlank() ||
         line.words.any { !it.pronunciationText.isNullOrBlank() }
@@ -2837,6 +3017,7 @@ private fun KaraokeLyricLine(
                     compactBackgroundLocalization = compactBackgroundLocalization,
                     positionState = positionState,
                     isActive = isMainActive,
+                    lyricWordWipeEnabled = lyricWordWipeEnabled,
                 )
             } else {
                 // Main vocal FullWidthAlphaGradientFlexboxLayout (karaoke_line_flexbox)
@@ -3044,6 +3225,7 @@ private fun LineSyncedContent(
     compactBackgroundLocalization: Boolean,
     positionState: State<Long>,
     isActive: Boolean,
+    lyricWordWipeEnabled: Boolean = false,
 ) {
     val mainAlphaModifier = Modifier.graphicsLayer {
         alpha = unlitAlpha + (MotionTokens.KaraokePrimaryAlpha - unlitAlpha) * activePresence.value
@@ -3070,12 +3252,13 @@ private fun LineSyncedContent(
     val backgroundTranslationLineHeight = if (compactBackgroundLocalization) 22.sp else 25.sp
     val backgroundGap = if (compactBackgroundLocalization) 2.dp else 4.dp
 
-    // v0.5：逐字高亮——活跃行用 WordWipeLine（LRC 行级时间按字均分），非活跃行不变。
+    // v0.5 逐字高亮，v0.6 P0 加开关：lyricWordWipeEnabled 开且行有可切分的字符才走 word-wipe，
+    // 否则回落整行高亮（关闭即取消逐字）。
     val charSpans = remember(line) {
         val word = line.words.firstOrNull() ?: return@remember emptyList()
         estimateCharSpans(word.text, line.startMs, line.endMs.coerceAtLeast(line.startMs + 1L))
     }
-    val useWordWipe = isActive && charSpans.isNotEmpty()
+    val useWordWipe = lyricWordWipeEnabled && isActive && charSpans.isNotEmpty()
 
     if (!line.pronunciationText.isNullOrBlank()) {
         Text(

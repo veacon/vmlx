@@ -6,6 +6,9 @@ package dev.amatv.luoxue
  */
 object SimplifiedChinese {
     val T2S_FALLBACK: Map<Char, Char> = mapOf(
+        // v0.7：补齐高频人名/歌名字（周杰倫、任賢齊、陳奕迅等），
+        // 让 API 23 设备与纯 JVM 单测也能正确归一，不完全依赖 ICU。
+        '倫' to '伦', '賢' to '贤', '齊' to '齐',
         '們' to '们', '來' to '来', '傳' to '传', '這' to '这', '個' to '个', '時' to '时', '說' to '说',
         '後' to '后',
         '圍' to '围', '陣' to '阵', '際' to '际', '陸' to '陆', '顆' to '颗', '絡' to '络',

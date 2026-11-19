@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="phone_sign_in_title">在手機上登入</string>
+    <string name="phone_sign_in_instructions">讓手機與電視連線同一個 Wi-Fi，再掃描此 QR Code 登入 Apple Music。</string>
+    <string name="phone_sign_in_waiting">請用手機掃描 QR Code。</string>
+    <string name="phone_sign_in_starting">正在準備登入…</string>
+    <string name="phone_sign_in_authorizing">請在手機上完成登入。</string>
+    <string name="phone_sign_in_complete">已完成登入，正在重新整理「現在收聽」。</string>
+    <string name="phone_sign_in_expired">QR Code 已過期，請重試取得新代碼。</string>
+    <string name="phone_sign_in_failed">無法啟動手機登入，請重試。</string>
+    <string name="phone_sign_in_retry">重試</string>
+    <string name="phone_sign_in_cancel">關閉</string>
+    <string name="phone_sign_in_done">完成</string>
+    <string name="phone_sign_in_qr_description">掃描以在此電視登入 Apple Music</string>
+</resources>

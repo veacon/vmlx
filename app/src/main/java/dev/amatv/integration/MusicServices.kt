@@ -51,7 +51,7 @@ class MusicServices(context: Context) : RecommendationProvider {
         appContext,
         dev.amatv.luoxue.AudioQualityPreferences(appContext),
     )
-    private val lxPlayer = LxPlayerBridge(appContext, lxPlayback)
+    private val lxPlayer = LxPlayerBridge(appContext, lxPlayback, DecoderMode.load(appContext))
     private val songSpectrum = SongAudioSpectrum(appContext, lxPlayer::audioSessionId)
     private val mediaSession = PlaybackMediaSession(appContext)
     private val playbackPreparation = Mutex()
@@ -98,6 +98,81 @@ class MusicServices(context: Context) : RecommendationProvider {
     /** 未登录 Home/Browse 的 veil 编辑分组 shelves（空 = 调用方走 charts 兜底）。 */
     suspend fun veilShelves(locale: String, includeSpotlight: Boolean): List<ContentShelf> =
         veilSource.shelves(locale, includeSpotlight)
+
+    // v0.6 本地资料库：收藏 / 自建歌单 / 最近播放，全部落在 filesDir/local_library.json，
+    // 不依赖 Apple 登录。PlaylistImporter 走独立 OkHttp（QQ/网易云/酷狗公开歌单 + 文本列表）。
+    val localLibrary = LocalLibraryStore(appContext)
+    val localPlaylistImporter = PlaylistImporter(
+        http = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .build(),
+        store = localLibrary,
+    )
+
+    /** v0.6: phone configuration web server (QR on TV -> HTML on phone -> /playlist-import). */
+    val phoneConfigServer = dev.amatv.web.PhoneConfigServer(
+        appContext,
+        localPlaylistImporter,
+        appleMusic = object : dev.amatv.web.PhoneConfigServer.AppleMusicBridge {
+            override fun available(): Boolean = isCatalogConfigured
+
+            override fun signedIn(): Boolean = tokenStore.readUserToken() != null
+
+            override suspend fun developerToken(): String? = signInDeveloperToken()
+
+            override suspend fun completeSignIn(userToken: String): Boolean = completePhoneSignIn(userToken)
+        },
+    ).also { server ->
+        server.boot(kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        ))
+    }
+
+    /**
+     * v0.8: 登录链路的开发者令牌解析（打包令牌 → Apple 官网抓取，veil 同款兜底）。
+     *
+     * 打包/endpoint 令牌不可用时（本地 debug 构建常见），回落到 [AppleDisplayAuth]
+     * 从 music.apple.com 官网抓取的匿名 developer JWT——amp-api 接受它配合
+     * media-user-token 访问 /v1/me（veil.music 书签方案同款背书）。
+     * 都拿不到返回 null，8080 页会展示手动导入令牌的兜底方案。
+     *
+     * 注意：AppleDisplayAuth.bearer() 的抓取是同步阻塞网络请求，必须在 IO 线程
+     * 执行（否则 NetworkOnMainThreadException 会被 runCatching 静默吞掉）。
+     */
+    suspend fun signInDeveloperToken(): String? = withContext(Dispatchers.IO) {
+        runCatching { developerTokens.token() }.getOrNull()
+            ?.takeIf { DeveloperTokenPolicy.isUsable(it) }
+            ?: dev.amatv.veilsource.AppleDisplayAuth.get(appContext).bearer(forceRefresh = true)
+    }
+
+    /** 导入一个链接 / 文本歌单，返回结果（Ok=成功+数量, Err=原因）。 */
+    suspend fun importLocalPlaylist(raw: String) = localPlaylistImporter.import(raw)
+
+    /** 切换某首歌是否收藏。 */
+    fun toggleLocalFavorite(track: Track) = localLibrary.toggleFavorite(track)
+
+    /**
+     * 把一张专辑/歌单整体存进本地资料库（专辑页「添加歌单」按钮）。
+     *
+     * [originKey] 必须是稳定来源标识（`album:<catalogId>` / `playlist:<id>`），
+     * 用标题会在同名专辑之间串台、且改名后重复添加；[coverUrl] 传容器封面，
+     * 让资料库以「一个歌单卡片」呈现整张专辑，而不是散成一堆单曲。
+     */
+    fun addLocalPlaylistFromAlbum(
+        name: String,
+        originKey: String,
+        coverUrl: String?,
+        tracks: List<Track>,
+    ): LocalLibraryStore.PlaylistUpsert =
+        localLibrary.addAsPlaylist(name, originKey, coverUrl, tracks)
+
+    /** 新建一个本地歌单（可预填歌曲）。 */
+    fun createLocalPlaylist(name: String, tracks: List<Track> = emptyList()): LocalLibraryStore.LocalPlaylist =
+        localLibrary.createPlaylist(name, tracks)
+
+    /** 记录一条最近播放（有效播放 >10s 才应在调用方触发）。 */
+    fun recordLocalRecent(track: Track) = localLibrary.recordRecent(track)
 
     val ytmPairingConfigured get() = google.configured
     val ytmSignedIn get() = google.signedIn
@@ -218,6 +293,66 @@ class MusicServices(context: Context) : RecommendationProvider {
         return userToken
     }
 
+    /**
+     * Phone web sign-in result (8080 page). Validates the token before storing it.
+     *
+     * Only account metadata is adopted: playback still goes through the LX
+     * (落雪) engine and this app never reports play history to Apple Music.
+     */
+    internal suspend fun completePhoneSignIn(userToken: String): Boolean = runCatching {
+        val candidate = validatePhoneAuthentication(userToken)
+        completePhoneAuthentication(candidate)
+    }.isSuccess
+
+    /**
+     * v0.8 上游同款（am_atv phoneAuthentication）：开一个临时区网配对服务器，
+     * 手机扫码打开 Apple 登录页（MusicKit JS），授权后送回 Music User Token。
+     * developerToken 走 [signInDeveloperToken] 级联（打包 → 官网抓取兜底）。
+     */
+    internal suspend fun phoneAuthentication(advertisedAuthority: String? = null, port: Int = 0): PhoneMusicAuthorization {
+        val developerToken = signInDeveloperToken()
+            ?: throw IllegalStateException(AppText.text(R.string.services_credentials_expired_update))
+        var created: PhoneMusicAuthorization? = null
+        try {
+            return withContext(Dispatchers.IO) {
+                PhoneMusicAuthorization(developerToken, BuildConfig.VERSION_NAME, "zh-CN",
+                    advertisedAuthority = advertisedAuthority, port = port).also { created = it }
+            }
+        } catch (failure: Throwable) {
+            // The return dispatch can be cancelled after IO created the socket.
+            created?.close()
+            throw failure
+        }
+    }
+
+    internal class ValidatedPhoneAuthentication internal constructor(
+        internal val userToken: String,
+        internal val previousToken: String?,
+    )
+
+    /** Candidate validation never changes the retained account. */
+    internal suspend fun validatePhoneAuthentication(userToken: String): ValidatedPhoneAuthentication {
+        require(isPhoneMusicUserToken(userToken)) { AppText.text(R.string.services_auth_invalid_user_token) }
+        val previous = tokenStore.readUserToken()
+        val developerToken = signInDeveloperToken()
+            ?: throw IllegalStateException(AppText.text(R.string.services_credentials_expired_update))
+        AppleMusicApi(
+            BuildConfig.APPLE_MUSIC_STOREFRONT,
+            DeveloperTokenClient(endpoint = "", bundledToken = developerToken),
+        ) { userToken }
+            .userStorefront()
+        return ValidatedPhoneAuthentication(userToken, previous)
+    }
+
+    /** Called by the current attempt, immediately before the UI handoff. */
+    internal fun completePhoneAuthentication(candidate: ValidatedPhoneAuthentication) {
+        // Only account metadata is adopted: playback still goes through the LX
+        // (落雪) engine and this app never reports play history to Apple Music.
+        tokenStore.writeUserToken(candidate.userToken)
+        mediaSession.clear()
+        bridge.release()
+    }
+
     fun signOut() {
         webAuthenticationSession.markLocalWebSessionForReset()
         songSpectrum.setActive(false)
@@ -252,6 +387,12 @@ class MusicServices(context: Context) : RecommendationProvider {
      * 已登录沿用现有 user-storefront 链路。修复"点击歌单/专辑显示无法载入曲目"。
      */
     suspend fun collectionTracks(collection: Track): List<Track> {
+        // v0.6.3: 本地资料库歌单（resourceType=local-playlist）——曲目已存在本地，
+        // 直接从 LocalLibraryStore 取，不再走 Apple/veil 网络解析。
+        if (collection.resourceType == "local-playlist") {
+            val id = collection.resourceId ?: collection.catalogId ?: collection.id
+            return localLibrary.playlist(id)?.songs.orEmpty()
+        }
         if (tokenStore.readUserToken() == null) {
             // 未登录：只走 veil 匿名通道（api.music.apple.com 在 Demo 态无 bundled token 必失败）。
             return veilSource.collectionTracks(collection)
@@ -321,6 +462,22 @@ class MusicServices(context: Context) : RecommendationProvider {
 
     /** 手动换源（播放页菜单键面板）：跳过当前命中脚本强制重解析，保持进度。 */
     fun switchLxSource(): Boolean = lxPlayer.switchSource()
+
+    /** v0.8: 当前解码方式（软解/FFmpeg、硬解/MediaCodec，veil 同款）。 */
+    fun currentDecoderMode(): DecoderMode = DecoderMode.load(appContext)
+
+    /**
+     * v0.8: 软解/硬解切换（设置页入口）。持久化后立即重建播放器（同曲同位续播）；
+     * 解码方式的取舍与播放源无关——点播仍全走落雪直链。
+     */
+    fun setDecoderMode(mode: DecoderMode) {
+        if (mode == DecoderMode.load(appContext)) return
+        DecoderMode.save(appContext, mode)
+        lxPlayer.applyDecoderMode(mode)
+    }
+
+    /** v0.8: 本机 FFmpeg 软解组件是否可用（64 位设备可能缺失原生库）。 */
+    fun ffmpegDecoderAvailable(): Boolean = FfmpegSupport.available
 
     fun audioSpectrum(): AudioSpectrum = songSpectrum.sample()
     fun setSpectrumActive(enabled: Boolean) = songSpectrum.setActive(enabled)

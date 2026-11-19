@@ -79,7 +79,11 @@ import dev.amatv.data.MockCatalog
 import dev.amatv.i18n.AppText
 import dev.amatv.i18n.destinationLabel
 import dev.amatv.integration.AutoplaySource
+import dev.amatv.luoxue.toLxSong
 import dev.amatv.integration.MusicConnectionState
+import dev.amatv.integration.PhoneMusicAuthorization
+import dev.amatv.integration.PhoneMusicAuthorizationExpired
+import dev.amatv.integration.PhoneMusicAuthStatus
 import dev.amatv.integration.MusicServices
 import dev.amatv.integration.AuthLaunchGate
 import dev.amatv.integration.retryCatalogRequest
@@ -429,6 +433,12 @@ fun AmAtvApp() {
     var previousDestination by remember {
         mutableStateOf(startupCheckpoint?.previousDestination ?: playbackPrefs.activeTab)
     }
+    // v0.6.5: 播放来源界面独立记录。previousDestination 会被顶栏导航反复覆盖，
+    // 不能再用作「播放返回目标」。nowPlayingOrigin 只在进入播放时写入，
+    // 保证从哪个界面进入播放，按返回就精确回到那个界面。
+    var nowPlayingOrigin by remember {
+        mutableStateOf(startupCheckpoint?.previousDestination ?: playbackPrefs.activeTab)
+    }
     var track by remember {
         mutableStateOf(startupCheckpoint?.queue?.getOrNull(startupCheckpoint.currentIndex)
             ?: MockCatalog.tracks.first())
@@ -457,6 +467,8 @@ fun AmAtvApp() {
     var playbackPrepared by remember { mutableStateOf(false) }
     var hasUserPlaybackRequest by remember { mutableStateOf(false) }
     var lowPerformanceMode by remember { mutableStateOf(playbackPrefs.lowPerformanceMode) }
+    // v0.8: 软解/硬解切换状态（持久化在 DecoderMode 自己的 prefs，切档即时重建播放器）。
+    var decoderMode by remember { mutableStateOf(services.currentDecoderMode()) }
     var playbackMessage by remember { mutableStateOf<String?>(null) }
     var waitingQueueEntryId by remember { mutableStateOf<Long?>(null) }
     var expectedPlaybackGeneration by remember { mutableLongStateOf(0L) }
@@ -467,6 +479,12 @@ fun AmAtvApp() {
     var networkRetryJob by remember { mutableStateOf<Job?>(null) }
     var networkRetryCount by remember(track.id) { mutableIntStateOf(0) }
     var connectionState by remember { mutableStateOf(services.connectionState) }
+    // Apple Music 登录：TV 端上游同款二维码弹窗（临时配对服务器）；8080 页保留兜底入口。
+    var amSignInVisible by remember { mutableStateOf(false) }
+    var amSignInPhase by remember { mutableStateOf(PhoneSignInPhase.Waiting) }
+    var phoneSignInSession by remember { mutableStateOf<PhoneMusicAuthorization?>(null) }
+    var phoneSignInEpoch by remember { mutableIntStateOf(0) }
+    var phoneSignInError by remember { mutableStateOf<String?>(null) }
     val lxStreamInfo by services.lxStreamInfo().collectAsState()
     val lyricsSourceLabel by services.lyricsSource.collectAsState()
     var serviceMessage by remember { mutableStateOf<String?>(null) }
@@ -508,6 +526,12 @@ fun AmAtvApp() {
     var shuffleEnabled by remember { mutableStateOf(playbackPrefs.shuffleEnabled) }
     var autoplayEnabled by remember { mutableStateOf(playbackPrefs.autoplayEnabled) }
     var lyricOffsetMs by remember { mutableLongStateOf(playbackPrefs.lyricOffsetMs) }
+    // v0.6 P0：逐字歌词开关（行级 LRC word-wipe，v0.5 引入），持久化，默认关闭。
+    var lyricWordWipeEnabled by remember { mutableStateOf(playbackPrefs.lyricWordWipeEnabled) }
+    // v0.6：当前音质档位（与 LxPlayback 共享同一份 AudioQualityPreferences）。
+    var audioQuality by remember { mutableStateOf(services.lxPlayback().quality()) }
+    // v0.6：专辑页「添加歌单」的操作反馈（本地库写入结果）。
+    var localAlbumMessage by remember { mutableStateOf<String?>(null) }
     // v0.2：导航栏「正在播放」用当前歌名替换（veil 实验室开关同款），持久化。
     var nowPlayingTitleAsName by remember { mutableStateOf(playbackPrefs.nowPlayingTitleAsName) }
     // v0.2：本项目只有简体版本——歌词不再有翻译/发音/语言变体，variant 固定为单值。
@@ -619,6 +643,13 @@ fun AmAtvApp() {
         }
     }
 
+    // v0.7：脚本引擎后台预热——10 个 QuickJS 脚本初始化（分批并发）原本压在
+    // 首次点播的解析路径上。启动时后台提前就绪，首曲解析省去这段初始化时间。
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            services.lxPlayback().ensureReady()
+        }
+    }
     // 在 queueController 初始化后触发首次预取（App 启动时）
     LaunchedEffect(Unit) {
         startShelfPreload()
@@ -741,6 +772,29 @@ fun AmAtvApp() {
         reloadNonce++
     }
 
+    /** Shared post-sign-in transition: only the home/Now Playing data is refreshed. */
+    fun applyAccountSignedIn() {
+        selectionGeneration++
+        playbackRequestJob?.cancel()
+        isPlaying = false
+        playWhenReady = false
+        playbackPrepared = false
+        hasUserPlaybackRequest = false
+        expectedPlaybackGeneration = 0L
+        playbackMessage = null
+        lyricsByTrackId = emptyMap()
+        lyricsLookupFailures = emptySet()
+        activeLyrics = activeLyrics.copy(phase = LyricsLoadPhase.Idle)
+        connectionState = dev.amatv.integration.MusicConnectionState.SignedIn
+        resetLibraryPagination()
+        shelvesByDestination = emptyMap()
+        loadingDestinations = setOf(Destination.Home)
+        previousDestination = Destination.Home
+        destination = Destination.Home
+        serviceMessage = null
+        reloadNonce++
+    }
+
     val webAuthenticationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -753,26 +807,92 @@ fun AmAtvApp() {
         } else {
             runCatching { services.completeWebAuthentication(data) }
                 .onSuccess {
-                    selectionGeneration++
-                    playbackRequestJob?.cancel()
-                    isPlaying = false
-                    playWhenReady = false
-                    playbackPrepared = false
-                    hasUserPlaybackRequest = false
-                    expectedPlaybackGeneration = 0L
-                    playbackMessage = null
-                    lyricsByTrackId = emptyMap()
-                    lyricsLookupFailures = emptySet()
-                    activeLyrics = activeLyrics.copy(phase = LyricsLoadPhase.Idle)
-                    connectionState = dev.amatv.integration.MusicConnectionState.SignedIn
-                    resetLibraryPagination()
-                    shelvesByDestination = emptyMap()
-                    loadingDestinations = setOf(Destination.Home)
-                    destination = Destination.Home
-                    serviceMessage = null
-                    reloadNonce++
+                    applyAccountSignedIn()
                 }
                 .onFailure { serviceMessage = it.message ?: AppText.text(R.string.app_sign_in_failed) }
+        }
+    }
+
+    /** v0.8 上游同款（am_atv startPhoneSignIn）：临时配对服务器 + 状态镜像 + awaitToken。 */
+    fun startPhoneSignInSession() {
+        val epoch = ++phoneSignInEpoch
+        amSignInVisible = true
+        amSignInPhase = PhoneSignInPhase.Starting
+        phoneSignInError = null
+        scope.launch {
+            var session: PhoneMusicAuthorization? = null
+            var statusJob: Job? = null
+            try {
+                val active = services.phoneAuthentication()
+                session = active
+                if (epoch != phoneSignInEpoch) return@launch
+                phoneSignInSession = active
+                amSignInPhase = PhoneSignInPhase.Waiting
+                statusJob = launch {
+                    active.status.collect { status ->
+                        if (epoch == phoneSignInEpoch) when (status) {
+                            PhoneMusicAuthStatus.PhoneConnected, PhoneMusicAuthStatus.Authorized ->
+                                amSignInPhase = PhoneSignInPhase.Authorizing
+                            PhoneMusicAuthStatus.Expired -> amSignInPhase = PhoneSignInPhase.Expired
+                            else -> Unit
+                        }
+                    }
+                }
+                val token = active.awaitToken()
+                amSignInPhase = PhoneSignInPhase.Authorizing
+                val candidate = services.validatePhoneAuthentication(token)
+                if (epoch != phoneSignInEpoch) return@launch
+                // No suspension between account commit and its UI handoff.
+                services.completePhoneAuthentication(candidate)
+                applyAccountSignedIn()
+                amSignInPhase = PhoneSignInPhase.Complete
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: PhoneMusicAuthorizationExpired) {
+                if (epoch == phoneSignInEpoch) amSignInPhase = PhoneSignInPhase.Expired
+            } catch (error: Exception) {
+                Log.e("AmAtvPhoneSignIn", "phone sign-in failed", error)
+                if (epoch == phoneSignInEpoch) {
+                    phoneSignInError = error.message ?: error.javaClass.simpleName
+                    amSignInPhase = PhoneSignInPhase.Failed
+                }
+            } finally {
+                statusJob?.cancel()
+                session?.close()
+                if (epoch == phoneSignInEpoch) authLaunchGate.finish()
+            }
+        }
+    }
+
+    fun startPhoneSignIn() {
+        // v0.8 上游同款：未登录即可发起（Demo 态也放行，developerToken 由
+        // signInDeveloperToken 级联兜底）。同一时间只允许一个登录会话。
+        if (amSignInVisible) return
+        if (!authLaunchGate.tryBegin()) return
+        startPhoneSignInSession()
+    }
+
+    fun retryPhoneSignIn() {
+        if (!authLaunchGate.tryBegin()) return
+        startPhoneSignInSession()
+    }
+
+    fun closePhoneSignIn() {
+        phoneSignInEpoch++
+        phoneSignInSession?.close()
+        phoneSignInSession = null
+        amSignInVisible = false
+        authLaunchGate.finish()
+    }
+
+    // v0.8: 用户可能不开电视弹窗、纯手机在 8080 页完成登录。未登录期间轻量轮询
+    // （3 秒一次，开销可忽略），登录态翻转后自动刷新「现在收听」，登录后停止。
+    LaunchedEffect(connectionState) {
+        while (connectionState != MusicConnectionState.SignedIn) {
+            delay(3_000L)
+            if (services.connectionState == MusicConnectionState.SignedIn) {
+                applyAccountSignedIn()
+                break
+            }
         }
     }
 
@@ -909,23 +1029,9 @@ fun AmAtvApp() {
     }
 
     fun startSignIn() {
-        if (connectionState == MusicConnectionState.Demo) {
-            serviceMessage = services.setupMessage
-            destination = Destination.Account
-            return
-        }
-        if (!authLaunchGate.tryBegin()) return
-        scope.launch {
-            try {
-                webAuthenticationLauncher.launch(services.webAuthenticationIntent())
-            } catch (cancelled: CancellationException) {
-                authLaunchGate.finish()
-                throw cancelled
-            } catch (error: Exception) {
-                authLaunchGate.finish()
-                serviceMessage = error.message ?: AppText.text(R.string.app_apple_sign_in_unavailable)
-            }
-        }
+        // 仅保留手机网页登录（上游同款二维码流程），不再启动电视端 WebView。
+        // 未登录（含 Demo 态）都放行，developerToken 由 signInDeveloperToken 级联兜底。
+        startPhoneSignIn()
     }
 
     fun startYtmPairing() {
@@ -1135,7 +1241,10 @@ fun AmAtvApp() {
         // 音源接入（§6.3）：点播全走落雪 LX，不需要 Apple 登录。
         supersedeStartupQueueWithNewContext()
         ++selectionGeneration
-        if (destination != Destination.NowPlaying) previousDestination = destination
+        if (destination != Destination.NowPlaying) {
+            previousDestination = destination
+            nowPlayingOrigin = destination
+        }
         pendingRestore = null
 
         val fullQueue = if (contextQueue.isNotEmpty()) {
@@ -1164,7 +1273,10 @@ fun AmAtvApp() {
         if (tracks.isEmpty() || index !in tracks.indices) return
         // 音源接入（§6.3）：合集详情走匿名 catalog（未登录也可载入曲目）。
         supersedeStartupQueueWithNewContext()
-        if (destination != Destination.NowPlaying) previousDestination = destination
+        if (destination != Destination.NowPlaying) {
+            previousDestination = destination
+            nowPlayingOrigin = destination
+        }
         pendingRestore = null
         playWhenReady = true
         queueController.playContext(
@@ -1218,7 +1330,10 @@ fun AmAtvApp() {
             }
             return
         }
-        if (destination != Destination.NowPlaying) previousDestination = destination
+        if (destination != Destination.NowPlaying) {
+            previousDestination = destination
+            nowPlayingOrigin = destination
+        }
         destination = Destination.NowPlaying
     }
 
@@ -1420,7 +1535,7 @@ fun AmAtvApp() {
 
     val saveCurrentSession by rememberUpdatedState<(Boolean) -> Unit> saveSession@{ synchronous ->
         playbackPrefs.saveActiveTab(
-            if (destination == Destination.NowPlaying) previousDestination else destination,
+            if (destination == Destination.NowPlaying) nowPlayingOrigin else destination,
             synchronous,
         )
         if (!startupSessionLoaded && selectionGeneration == 0L) return@saveSession
@@ -1526,6 +1641,13 @@ fun AmAtvApp() {
         val cacheGeneration = services.contentCache.generation
         if (!kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { services.contentCache.canWrite() }) {
             return@LaunchedEffect
+        }
+        // v0.7：音频直链预取——把下一首/下下首的落雪直链提前解析并写入缓存，
+        // 切歌时 resolve() 命中缓存即可秒播，消除"切歌白等 20s+"。
+        // prefetch 内部自带 IO scope + 去重 + 负缓存，不阻塞歌词预取。
+        val lx = services.lxPlayback()
+        for (candidate in prefetchTargets) {
+            if (candidate.catalogKind == CatalogKind.Song) lx.prefetch(candidate.toLxSong())
         }
         for (candidate in prefetchTargets) {
             if (candidate.catalogKind != CatalogKind.Song) continue
@@ -1973,69 +2095,38 @@ fun AmAtvApp() {
                 }
 
                 Destination.Library -> {
-                    val recentlyAdded = async { cancellableResult { services.recentlyAdded() } }
-                    val playlists = async { cancellableResult { services.libraryPlaylistsPage() } }
-                    val songs = async { cancellableResult { services.librarySongsPage() } }
-                    val recentPlayed = async { cancellableResult { services.recentlyPlayedTracks() } }
+                    if (connectionState != dev.amatv.integration.MusicConnectionState.SignedIn) {
+                        // 未登录：资料库只有本地导入歌单（LocalLibraryScreen 自有数据），
+                        // 不再发匿名 veil 请求。
+                        emptyList()
+                    } else {
+                        // 登录后：资料库只保留「资料库播放列表」（与本地导入歌单合并，
+                        // 由 LocalLibraryScreen 渲染）。歌曲/最近添加/最近播放分区按用户
+                        // 要求移除，不再请求。retryCatalogRequest 抗首次网络抖动。
+                        val playlists = async { cancellableResult { retryCatalogRequest(fetch = { services.libraryPlaylistsPage() }) } }
 
-                    buildList {
-                        recentlyAdded.await().fold(
-                            onSuccess = { items ->
-                                if (items.isNotEmpty()) {
-                                    add(
-                                        ContentShelf(
-                                            id = "lib-recently-added",
-                                            title = AppText.text(R.string.app_recently_added),
-                                            items = items,
-                                            featured = true,
-                                        ),
-                                    )
-                                }
-                            },
-                            onFailure = errors::add,
-                        )
-                        playlists.await().fold(
-                            onSuccess = { page ->
-                                rememberLibraryPage("lib-playlists", page)
-                                if (page.items.isNotEmpty() || page.nextPage != null) {
-                                    add(
-                                        ContentShelf(
-                                            id = "lib-playlists",
-                                            title = AppText.text(R.string.app_library_playlists),
-                                            items = page.items,
-                                            featured = isEmpty(),
-                                        ),
-                                    )
-                                }
-                            },
-                            onFailure = { error ->
-                                errors += error
-                                libraryFailedShelves = libraryFailedShelves + "lib-playlists"
-                                add(ContentShelf("lib-playlists", AppText.text(R.string.app_library_playlists), emptyList()))
-                            },
-                        )
-                        songs.await().fold(
-                            onSuccess = { page ->
-                                rememberLibraryPage("lib-songs", page)
-                                if (page.items.isNotEmpty() || page.nextPage != null) {
-                                    add(ContentShelf("lib-songs", AppText.text(R.string.app_library_songs), page.items))
-                                }
-                            },
-                            onFailure = { error ->
-                                errors += error
-                                libraryFailedShelves = libraryFailedShelves + "lib-songs"
-                                add(ContentShelf("lib-songs", AppText.text(R.string.app_library_songs), emptyList()))
-                            },
-                        )
-                        recentPlayed.await().fold(
-                            onSuccess = { items ->
-                                if (items.isNotEmpty()) {
-                                    recentTracks = items
-                                    add(ContentShelf("lib-recent", AppText.text(R.string.app_recently_played), items))
-                                }
-                            },
-                            onFailure = errors::add,
-                        )
+                        buildList {
+                            playlists.await().fold(
+                                onSuccess = { page ->
+                                    rememberLibraryPage("lib-playlists", page)
+                                    if (page.items.isNotEmpty() || page.nextPage != null) {
+                                        add(
+                                            ContentShelf(
+                                                id = "lib-playlists",
+                                                title = AppText.text(R.string.app_library_playlists),
+                                                items = page.items,
+                                                featured = isEmpty(),
+                                            ),
+                                        )
+                                    }
+                                },
+                                onFailure = { error ->
+                                    errors += error
+                                    libraryFailedShelves = libraryFailedShelves + "lib-playlists"
+                                    add(ContentShelf("lib-playlists", AppText.text(R.string.app_library_playlists), emptyList()))
+                                },
+                            )
+                        }
                     }
                 }
 
@@ -2091,7 +2182,7 @@ fun AmAtvApp() {
             services.setSpectrumActive(false)
         }
     }
-    val activeBrowseDestination = if (isNowPlaying) previousDestination else destination
+    val activeBrowseDestination = if (isNowPlaying) nowPlayingOrigin else destination
     val nowPlayingAlpha = animateFloatAsState(
         targetValue = if (isNowPlaying) 1f else 0f,
         animationSpec = tween(
@@ -2109,7 +2200,7 @@ fun AmAtvApp() {
     }
 
     BackHandler(enabled = isNowPlaying) {
-        destination = previousDestination
+        destination = nowPlayingOrigin
     }
 
     val focusFrameController = remember { FocusFrameController() }
@@ -2203,6 +2294,7 @@ fun AmAtvApp() {
                             }
                         },
                         onSignIn = (::startSignIn),
+                        onPhoneSignIn = (::startPhoneSignIn),
                         ytmSignedIn = ytmSignedIn,
                         ytmPairing = ytmPairing,
                         ytmPairingConfigured = services.ytmPairingConfigured,
@@ -2284,8 +2376,13 @@ fun AmAtvApp() {
                             lowPerformanceMode = it
                             playbackPrefs.lowPerformanceMode = it
                         },
+                        decoderMode = decoderMode,
+                        onDecoderModeChange = { mode ->
+                            services.setDecoderMode(mode)
+                            decoderMode = services.currentDecoderMode()
+                        },
+                        ffmpegAvailable = services.ffmpegDecoderAvailable(),
                         cacheSettingsContent = {
-                            LanguageSettings()
                             NowPlayingLabelSettings(
                                 titleAsName = nowPlayingTitleAsName,
                                 onToggle = { enabled ->
@@ -2296,6 +2393,40 @@ fun AmAtvApp() {
                             ContentCacheSettings(services.contentCache)
                             LxSourceSettings(services.lxPlayback())
                         },
+                        // v0.6: 逐字歌词开关放在「歌词同步」分区顶部，遥控器第一屏即可配置。
+                        lyricSettingsContent = {
+                            LyricSettings(
+                                wordWipeEnabled = lyricWordWipeEnabled,
+                                onWordWipeToggle = { enabled ->
+                                    lyricWordWipeEnabled = enabled
+                                    playbackPrefs.lyricWordWipeEnabled = enabled
+                                },
+                            )
+                        },
+                        localLibrary = services.localLibrary,
+                        localImporter = services.localPlaylistImporter,
+                        serverUrlFlow = services.phoneConfigServer.serverUrlFlow,
+                        onAddLocalAlbum = { collection, tracks ->
+                            // v0.6.1: 整张专辑/歌单作为「一个」本地歌单入库——用容器稳定 id 做
+                            // originKey（同名专辑不串台），并带上容器封面，资料库里显示成一个歌单卡片。
+                            val kind = if (collection.catalogKind == dev.amatv.model.CatalogKind.Playlist) "playlist" else "album"
+                            val stableId = collection.catalogId ?: collection.resourceId ?: collection.id
+                            val result = services.addLocalPlaylistFromAlbum(
+                                collection.title.ifBlank { "Album" },
+                                "$kind:$stableId",
+                                collection.artworkUrl,
+                                tracks,
+                            )
+                            localAlbumMessage = when (result) {
+                                is dev.amatv.integration.LocalLibraryStore.PlaylistUpsert.Created ->
+                                    "Added playlist \"${result.playlist.name}\" (${result.added} songs)"
+                                is dev.amatv.integration.LocalLibraryStore.PlaylistUpsert.Updated ->
+                                    "Updated \"${result.playlist.name}\" (+${result.added} songs)"
+                                is dev.amatv.integration.LocalLibraryStore.PlaylistUpsert.Unchanged ->
+                                    "Playlist is already up to date"
+                            }
+                        },
+                        localAlbumMessage = localAlbumMessage,
                     )
                 }
                 }
@@ -2343,6 +2474,11 @@ fun AmAtvApp() {
                             activeLyrics.phase == LyricsLoadPhase.Failed,
                         onRetryLyrics = ::retryCurrentLyrics,
                         lyricOffsetMs = lyricOffsetMs,
+                        lyricWordWipeEnabled = lyricWordWipeEnabled,
+                        audioQuality = audioQuality,
+                        onSetQuality = { q ->
+                            audioQuality = services.lxPlayback().setQuality(q)
+                        },
                         statusMessage = playbackMessage ?: if (queueState.awaitingNext) {
                             (queueState.autoplayStatus as? dev.amatv.playback.AutoplayStatus.Error)?.message
                         } else null,
@@ -2365,6 +2501,15 @@ fun AmAtvApp() {
                             },
                     )
                     }
+                }
+                if (amSignInVisible) {
+                    PhoneMusicSignInDialog(
+                        url = phoneSignInSession?.pairing?.url,
+                        phase = amSignInPhase,
+                        errorMessage = phoneSignInError.takeIf { amSignInPhase == PhoneSignInPhase.Failed },
+                        onRetry = ::retryPhoneSignIn,
+                        onDismiss = ::closePhoneSignIn,
+                    )
                 }
                 FocusFrameOverlay(focusFrameController)
             }
@@ -2392,6 +2537,7 @@ private fun BrowseShell(
     setupMessage: String?,
     onDestination: (Destination) -> Unit,
     onSignIn: () -> Unit,
+    onPhoneSignIn: (() -> Unit)? = null,
     ytmSignedIn: Boolean,
     ytmPairing: GoogleTvPairing?,
     ytmPairingConfigured: Boolean,
@@ -2409,7 +2555,16 @@ private fun BrowseShell(
     onAutoplaySourceChange: (AutoplaySource) -> Unit = {},
     lowPerformanceMode: Boolean = false,
     onLowPerformanceModeChange: (Boolean) -> Unit = {},
+    decoderMode: dev.amatv.integration.DecoderMode = dev.amatv.integration.DecoderMode.HARDWARE,
+    onDecoderModeChange: (dev.amatv.integration.DecoderMode) -> Unit = {},
+    ffmpegAvailable: Boolean = true,
     cacheSettingsContent: @Composable () -> Unit = {},
+    lyricSettingsContent: @Composable () -> Unit = {},
+    localLibrary: dev.amatv.integration.LocalLibraryStore? = null,
+    localImporter: dev.amatv.integration.PlaylistImporter? = null,
+    serverUrlFlow: kotlinx.coroutines.flow.StateFlow<String>? = null,
+    onAddLocalAlbum: (collection: Track, tracks: List<Track>) -> Unit = { _, _ -> },
+    localAlbumMessage: String? = null,
 ) {
     val density = LocalDensity.current
     val navigationDestinations = remember {
@@ -2439,11 +2594,9 @@ private fun BrowseShell(
     val contentFocusEntry = remember(destination) { ContentFocusEntry() }
     fun closeCollection() {
         browser.close()
-        if (destination == Destination.Home) {
-            returnToContent++
-        } else {
-            onDestination(Destination.Home)
-        }
+        // v0.6.4: 返回时必须停留在进入详情前的来源界面（资料库/现在收听/搜索…），
+        // 只关闭详情覆盖层并把焦点还回该界面内容，不再硬编码跳到「现在收听」。
+        returnToContent++
     }
     BackHandler(enabled = isBrowseVisible && collection != null) { closeCollection() }
     LaunchedEffect(destination, isBrowseVisible, collection?.id, collectionState.loading, collectionState.error, returnToContent) {
@@ -2452,6 +2605,9 @@ private fun BrowseShell(
         when {
             collection != null -> detailFocus.requestFocus(detailFirstFocus)
             returnToContent > 0 -> contentFocusEntry.requestFocus(firstContentFocus)
+            // v0.6.3: 与「现在收听」保持一致——切到资料库时焦点落在顶栏
+            // 「资料库」标签上，按 DOWN 再进入内容区（HomeShelves 的
+            // firstContentFocus 已挂到第一张卡片实体）。不再直达内容。
             else -> runCatching { navigationFocus[destination]?.requestFocus() }
         }
     }
@@ -2509,7 +2665,63 @@ private fun BrowseShell(
                         )
                     }
                     CompositionLocalProvider(LocalContentFocusEntry provides contentFocusEntry) {
-                        HomeScreen(
+                        when (destination) {
+                            Destination.Library -> {
+                                // v0.6：本地资料库页（收藏 / 歌单 / 最近播放 + 添加链接）。
+                                // v0.8：登录后 Apple 用户库分区（资料库歌单/歌曲/最近添加/
+                                // 最近播放）叠加在本地分区之前，数据来自 shelvesByDestination。
+                                if (localLibrary != null && serverUrlFlow != null) {
+                                    LocalLibraryScreen(
+                                        store = localLibrary,
+                                        serverUrlFlow = serverUrlFlow,
+                                        onOpenTrack = { t, q ->
+                                            onOpenTrack(t, q)
+                                        },
+                                        // v0.6.3: 资料库歌单点击 → 与「现在收听」同一套
+                                        // CollectionScreen 详情页（封面 + 播放/随机 + 曲目列表）。
+                                        onOpenCollection = { playlistTrack ->
+                                            browser.open(playlistTrack)
+                                        },
+                                        appleShelves = shelves,
+                                        onLoadMoreShelf = onLoadMoreShelf,
+                                        shelfPagination = shelfPagination,
+                                        focusRequester = firstContentFocus,
+                                        navigationFocusRequester = navigationFocus[destination],
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .graphicsLayer {
+                                                alpha = entrance.value
+                                                translationY = (1f - entrance.value) * travelPx
+                                            },
+                                    )
+                                } else {
+                                    // 数据层缺失的兜底：仍显示旧 HomeShelves，避免空白。
+                                    HomeScreen(
+                                        destination = destination,
+                                        currentTrack = currentTrack,
+                                        tracks = searchTracks,
+                                        searchLoading = searchLoading,
+                                        recentTracks = recentTracks,
+                                        homeShelves = shelves,
+                                        homeShelfPagination = shelfPagination,
+                                        onLoadMoreShelf = onLoadMoreShelf,
+                                        homeLoading = loading,
+                                        connectionState = connectionState,
+                                        setupMessage = setupMessage,
+                                        onSignIn = onSignIn,
+                                        onPhoneSignIn = onPhoneSignIn,
+                                        onOpenTrack = onOpenTrack,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .graphicsLayer {
+                                                alpha = entrance.value
+                                                translationY = (1f - entrance.value) * travelPx
+                                            },
+                                    )
+                                }
+                            }
+                            else -> {
+                                HomeScreen(
                             destination = destination,
                             currentTrack = currentTrack,
                             tracks = searchTracks,
@@ -2522,6 +2734,7 @@ private fun BrowseShell(
                             connectionState = connectionState,
                             setupMessage = setupMessage,
                             onSignIn = onSignIn,
+                            onPhoneSignIn = onPhoneSignIn,
                             ytmSignedIn = ytmSignedIn,
                             ytmPairing = ytmPairing,
                             ytmPairingConfigured = ytmPairingConfigured,
@@ -2545,7 +2758,11 @@ private fun BrowseShell(
                             onAutoplaySourceChange = onAutoplaySourceChange,
                             lowPerformanceMode = lowPerformanceMode,
                             onLowPerformanceModeChange = onLowPerformanceModeChange,
+                            decoderMode = decoderMode,
+                            onDecoderModeChange = onDecoderModeChange,
+                            ffmpegAvailable = ffmpegAvailable,
                             cacheSettingsContent = cacheSettingsContent,
+                            lyricSettingsContent = lyricSettingsContent,
                             firstContentFocusRequester = firstContentFocus,
                             navigationFocusRequester = navigationFocus[destination],
                             modifier = Modifier
@@ -2555,9 +2772,11 @@ private fun BrowseShell(
                                     translationY = (1f - entrance.value) * travelPx
                                 },
                         )
+                            }
                     }
                 }
             }
+        }
         }
         }
         if (collection != null) {
@@ -2584,6 +2803,8 @@ private fun BrowseShell(
                             onPlay = { index, shuffle ->
                                 onPlayCollection(collection, collectionState.tracks, index, shuffle)
                             },
+                            onAddAlbum = { onAddLocalAlbum(collection, collectionState.tracks) },
+                            albumMessage = localAlbumMessage,
                         )
                     }
                 }

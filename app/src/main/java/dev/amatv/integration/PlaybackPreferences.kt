@@ -145,6 +145,16 @@ class PlaybackPreferences(context: Context) : QueuePreferences {
             preferences.edit().putBoolean(KEY_LYRIC_PRONUNCIATION_ENABLED, value).apply()
         }
 
+    /**
+     * v0.6 P0：逐字歌词开关（行级 LRC 的 karaoke word-wipe，v0.5 引入的逐字点亮）。
+     * 默认关闭（回落到 v0.4 的整行高亮）；打开后活跃行按字逐一点亮，关闭即取消。
+     */
+    var lyricWordWipeEnabled: Boolean
+        get() = preferences.getBoolean(KEY_LYRIC_WORD_WIPE_ENABLED, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_LYRIC_WORD_WIPE_ENABLED, value).apply()
+        }
+
     /** Empty means follow the current app language. */
     var lyricTranslationLanguageTag: String
         get() = preferences.getString(KEY_LYRIC_TRANSLATION_LANGUAGE, "").orEmpty()
@@ -195,6 +205,7 @@ class PlaybackPreferences(context: Context) : QueuePreferences {
         const val KEY_NOW_PLAYING_TITLE_AS_NAME = "pref_now_playing_title_as_name"
         const val KEY_LYRIC_TRANSLATION_ENABLED = "pref_lyric_translation_enabled"
         const val KEY_LYRIC_PRONUNCIATION_ENABLED = "pref_lyric_pronunciation_enabled"
+        const val KEY_LYRIC_WORD_WIPE_ENABLED = "pref_lyric_word_wipe_enabled"
         const val KEY_LYRIC_TRANSLATION_LANGUAGE = "pref_lyric_translation_language"
         const val KEY_LYRIC_PRONUNCIATION_LANGUAGE = "pref_lyric_pronunciation_language"
         const val KEY_LOW_PERFORMANCE_MODE = "pref_playback_low_performance_mode"

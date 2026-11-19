@@ -213,6 +213,12 @@ dependencies {
     implementation("io.github.dokar3:quickjs-kt-android:1.0.15")
     implementation("androidx.media3:media3-datasource-okhttp:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // v0.6: 资料库导入弹窗二维码（TV 显示，手机扫码打开局域网 Web 管理页）。
+    implementation("com.google.zxing:core:3.5.3")
+    // v0.8: FFmpeg 音频软解扩展（veil.music 同款做法）。jar 只含 FfmpegAudioRenderer 等
+    // Java 类（media3 1.4.1 编译，与 1.11.x 二进制兼容）；原生 libffmpegJNI.so 在
+    // src/main/jniLibs/armeabi-v7a 下。缺 .so 不会崩，软解静默回落系统解码。
+    implementation(files("libs/media3-ffmpeg.jar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
